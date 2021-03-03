@@ -158,6 +158,7 @@ type KCP struct {
 	ssthresh                               uint32
 	rx_rttvar, rx_srtt                     int32
 	rx_rto, rx_minrto                      uint32
+	initial_tx_rto                         uint32
 	snd_wnd, rcv_wnd, rmt_wnd, cwnd, probe uint32
 	interval, ts_flush                     uint32
 	nodelay, updated                       uint32
@@ -415,6 +416,7 @@ func (kcp *KCP) update_ack(rtt int32) {
 	}
 	rto = uint32(kcp.rx_srtt) + _imax_(kcp.interval, uint32(kcp.rx_rttvar)<<2)
 	kcp.rx_rto = _ibound_(kcp.rx_minrto, rto, IKCP_RTO_MAX)
+	kcp.initial_tx_rto = _ibound_(kcp.rx_rto, rto+(rto>>3), IKCP_RTO_MAX) // 1.125xRTO for the initial tx, it is vital to avoid unnecessary retransmit
 }
 
 func (kcp *KCP) shrink_buf() {
@@ -810,7 +812,14 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	var change, lostSegs, fastRetransSegs, earlyRetransSegs uint64
 	minrto := int32(kcp.interval)
 
-	ref := kcp.snd_buf[:len(kcp.snd_buf)] // for bounds check elimination
+	sndBufLen := len(kcp.snd_buf)
+	initialTXRTO := kcp.rx_rto
+	if sndBufLen > 64 {
+		// Stream isn't thin
+		initialTXRTO = kcp.initial_tx_rto
+	}
+
+	ref := kcp.snd_buf[:sndBufLen] // for bounds check elimination
 	for k := range ref {
 		segment := &ref[k]
 		needsend := false
@@ -820,19 +829,19 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		if segment.xmit == 0 { // initial transmit
 			needsend = true
 			segment.rto = kcp.rx_rto
-			segment.resendts = current + segment.rto
+			segment.resendts = current + initialTXRTO
 		} else if segment.fastack >= resent { // fast retransmit
 			needsend = true
 			segment.fastack = 0
 			segment.rto = kcp.rx_rto
-			segment.resendts = current + segment.rto
+			segment.resendts = current + initialTXRTO
 			change++
 			fastRetransSegs++
 		} else if segment.fastack > 0 && newSegsCount == 0 { // early retransmit
 			needsend = true
 			segment.fastack = 0
 			segment.rto = kcp.rx_rto
-			segment.resendts = current + segment.rto
+			segment.resendts = current + initialTXRTO
 			change++
 			earlyRetransSegs++
 		} else if _itimediff(current, segment.resendts) >= 0 { // RTO
