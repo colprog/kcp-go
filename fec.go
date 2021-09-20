@@ -13,7 +13,7 @@ const (
 	typeData           = 0xf1
 	typeParity         = 0xf2
 	fecExpire          = 60000
-	rxFECMulti         = 3 // FEC keeps rxFECMulti* (dataShard+parityShard) ordered packets in memory
+	rxFECQueueSize     = 1024 * 8 // FEC keeps rxFECQueueSize ordered packets in memory
 )
 
 // fecPacket is a decoded FEC packet
@@ -60,7 +60,7 @@ func newFECDecoder(dataShards, parityShards int) *fecDecoder {
 	dec.dataShards = dataShards
 	dec.parityShards = parityShards
 	dec.shardSize = dataShards + parityShards
-	dec.rxlimit = rxFECMulti * dec.shardSize
+	dec.rxlimit = rxFECQueueSize
 	codec, err := reedsolomon.New(dataShards, parityShards)
 	if err != nil {
 		return nil
@@ -104,7 +104,7 @@ func (dec *fecDecoder) decode(in fecPacket) (recovered [][]byte) {
 				dec.dataShards = autoDS
 				dec.parityShards = autoPS
 				dec.shardSize = autoDS + autoPS
-				dec.rxlimit = rxFECMulti * dec.shardSize
+				dec.rxlimit = rxFECQueueSize
 				codec, err := reedsolomon.New(autoDS, autoPS)
 				if err != nil {
 					return nil
