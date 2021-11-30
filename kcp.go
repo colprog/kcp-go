@@ -61,7 +61,7 @@ var refTime time.Time = time.Now()
 func currentMs() uint32 { return uint32(time.Since(refTime) / time.Millisecond) }
 
 // output_callback is a prototype which ought capture conn and call conn.Write
-type output_callback func(buf []byte, size int)
+type output_callback func(buf []byte, size int, important bool)
 
 /* encode 8 bits unsigned int */
 func ikcp_encode8u(p []byte, c byte) []byte {
@@ -553,7 +553,7 @@ func (kcp *KCP) parse_data(newseg segment) bool {
 // codecs.
 //
 // 'ackNoDelay' will trigger immediate ACK, but surely it will not be efficient in bandwidth
-func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
+func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool) int {
 	snd_una := kcp.snd_una
 	if len(data) < IKCP_OVERHEAD {
 		return -1
@@ -625,7 +625,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 					repeat = kcp.parse_data(seg)
 				}
 			}
-			if regular && repeat {
+			if regular && !fromMetered && repeat {
 				atomic.AddUint64(&DefaultSnmp.RepeatSegs, 1)
 			}
 		} else if cmd == IKCP_CMD_WASK {
@@ -645,7 +645,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 
 	// update rtt with the latest ts
 	// ignore the FEC packet
-	if flag != 0 && regular {
+	if flag != 0 && regular && !fromMetered {
 		current := currentMs()
 		if _itimediff(current, latest) >= 0 {
 			kcp.update_ack(_itimediff(current, latest))
@@ -706,39 +706,55 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 	buffer := kcp.buffer
 	ptr := buffer[kcp.reserved:] // keep n bytes untouched
+	sendAllAcksMetered := false
 
 	// makeSpace makes room for writing
-	makeSpace := func(space int) {
+	makeSpace := func(space int, important bool) bool {
 		size := len(buffer) - len(ptr)
 		if size+space > int(kcp.mtu) {
-			kcp.output(buffer, size)
+			kcp.output(buffer, size, important)
 			ptr = buffer[kcp.reserved:]
+			return false
 		}
+		return important
 	}
 
 	// flush bytes in buffer if there is any
-	flushBuffer := func() {
+	flushBuffer := func(important bool) bool {
 		size := len(buffer) - len(ptr)
 		if size > kcp.reserved {
-			kcp.output(buffer, size)
+			kcp.output(buffer, size, important)
+			return false
 		}
+		return important
 	}
 
 	// flush acknowledges
-	for i, ack := range kcp.acklist {
-		makeSpace(IKCP_OVERHEAD)
-		// filter jitters caused by bufferbloat
-		if _itimediff(ack.sn, kcp.rcv_nxt) >= 0 || len(kcp.acklist)-1 == i {
-			seg.sn, seg.ts = ack.sn, ack.ts
-			ptr = seg.encode(ptr)
+	flushACK := func(important bool) bool {
+		if len(kcp.acklist) == 0 {
+			return false
 		}
+
+		seg.cmd = IKCP_CMD_ACK
+		for i, ack := range kcp.acklist {
+			makeSpace(IKCP_OVERHEAD, important)
+			// filter jitters caused by bufferbloat
+			if _itimediff(ack.sn, kcp.rcv_nxt) >= 0 || len(kcp.acklist)-1 == i {
+				seg.sn, seg.ts = ack.sn, ack.ts
+				ptr = seg.encode(ptr)
+			}
+		}
+		kcp.acklist = kcp.acklist[0:0]
+		return true
 	}
-	kcp.acklist = kcp.acklist[0:0]
 
 	if ackOnly { // flash remain ack segments
-		flushBuffer()
+		flushACK(sendAllAcksMetered)
+		flushBuffer(sendAllAcksMetered)
 		return kcp.interval
 	}
+
+	promoteToImportant := sendAllAcksMetered && flushACK(true)
 
 	// probe window size (if remote window size equals zero)
 	if kcp.rmt_wnd == 0 {
@@ -767,14 +783,16 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	// flush window probing commands
 	if (kcp.probe & IKCP_ASK_SEND) != 0 {
 		seg.cmd = IKCP_CMD_WASK
-		makeSpace(IKCP_OVERHEAD)
+		promoteToImportant = true
+		makeSpace(IKCP_OVERHEAD, promoteToImportant)
 		ptr = seg.encode(ptr)
 	}
 
 	// flush window probing commands
 	if (kcp.probe & IKCP_ASK_TELL) != 0 {
 		seg.cmd = IKCP_CMD_WINS
-		makeSpace(IKCP_OVERHEAD)
+		promoteToImportant = true
+		makeSpace(IKCP_OVERHEAD, promoteToImportant)
 		ptr = seg.encode(ptr)
 	}
 
@@ -802,6 +820,9 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	}
 	if newSegsCount > 0 {
 		kcp.snd_queue = kcp.remove_front(kcp.snd_queue, newSegsCount)
+	} else {
+		// 滑动窗口若无进展（窗口满或无新数据），提高发送优先级，希望能推动窗口进展
+		promoteToImportant = true
 	}
 
 	// calculate resent
@@ -866,8 +887,11 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			segment.wnd = seg.wnd
 			segment.una = seg.una
 
+			willPromote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
+			flushACK(willPromote || promoteToImportant)
+
 			need := IKCP_OVERHEAD + len(segment.data)
-			makeSpace(need)
+			promoteToImportant = makeSpace(need, promoteToImportant) || willPromote
 			ptr = segment.encode(ptr)
 			copy(ptr, segment.data)
 			ptr = ptr[len(segment.data):]
@@ -883,8 +907,9 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		}
 	}
 
+	flushACK(promoteToImportant)
 	// flash remain segments
-	flushBuffer()
+	flushBuffer(promoteToImportant)
 
 	// counter updates
 	sum := lostSegs

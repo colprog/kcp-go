@@ -24,6 +24,7 @@ package kcp
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"net"
@@ -120,6 +121,10 @@ type (
 		xconn           batchConn // for x/net
 		xconnWriteError error
 
+		// expensive but stable conn that we can fallback to
+		meteredTxqueue []ipv4.Message
+		meteredRemote  *net.UDPAddr
+
 		mu sync.Mutex
 	}
 
@@ -136,6 +141,24 @@ type (
 	}
 )
 
+func castToBatchConn(conn net.PacketConn) batchConn {
+	if conn == nil {
+		return nil
+	}
+
+	if _, ok := conn.(*net.UDPConn); ok {
+		addr, err := net.ResolveUDPAddr("udp", conn.LocalAddr().String())
+		if err == nil {
+			if addr.IP.To4() != nil {
+				return ipv4.NewPacketConn(conn)
+			} else {
+				return ipv6.NewPacketConn(conn)
+			}
+		}
+	}
+	return nil
+}
+
 // newUDPSession create a new udp session for client or server
 func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn net.PacketConn, ownConn bool, remote net.Addr, block BlockCrypt) *UDPSession {
 	sess := new(UDPSession)
@@ -149,21 +172,13 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	sess.remote = remote
 	sess.conn = conn
 	sess.ownConn = ownConn
+	sess.meteredRemote = nil
 	sess.l = l
 	sess.block = block
 	sess.recvbuf = make([]byte, mtuLimit)
 
 	// cast to writebatch conn
-	if _, ok := conn.(*net.UDPConn); ok {
-		addr, err := net.ResolveUDPAddr("udp", conn.LocalAddr().String())
-		if err == nil {
-			if addr.IP.To4() != nil {
-				sess.xconn = ipv4.NewPacketConn(conn)
-			} else {
-				sess.xconn = ipv6.NewPacketConn(conn)
-			}
-		}
-	}
+	sess.xconn = castToBatchConn(conn)
 
 	// FEC codec initialization
 	sess.fecDecoder = newFECDecoder(dataShards, parityShards)
@@ -181,9 +196,9 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 		sess.headerSize += fecHeaderSizePlus2
 	}
 
-	sess.kcp = NewKCP(conv, func(buf []byte, size int) {
+	sess.kcp = NewKCP(conv, func(buf []byte, size int, important bool) {
 		if size >= IKCP_OVERHEAD+sess.headerSize {
-			sess.output(buf[:size])
+			sess.output(buf[:size], important)
 		}
 	})
 	sess.kcp.ReserveBytes(sess.headerSize)
@@ -345,8 +360,12 @@ RESET_TIMER:
 // uncork sends data in txqueue if there is any
 func (s *UDPSession) uncork() {
 	if len(s.txqueue) > 0 {
-		s.tx(s.txqueue)
+		s.tx()
 		// recycle
+		for k := range s.meteredTxqueue {
+			s.meteredTxqueue[k].Buffers = nil
+		}
+		s.meteredTxqueue = s.meteredTxqueue[:0]
 		for k := range s.txqueue {
 			xmitBuf.Put(s.txqueue[k].Buffers[0])
 			s.txqueue[k].Buffers = nil
@@ -378,7 +397,7 @@ func (s *UDPSession) Close() error {
 		s.mu.Unlock()
 
 		if s.l != nil { // belongs to listener
-			s.l.closeSession(s.remote)
+			s.l.closeSession(s.remote, s.meteredRemote)
 			return nil
 		} else if s.ownConn { // client socket close
 			return s.conn.Close()
@@ -550,7 +569,7 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 // 2. CRC32 integrity
 // 3. Encryption
 // 4. TxQueue
-func (s *UDPSession) output(buf []byte) {
+func (s *UDPSession) output(buf []byte, important bool) {
 	var ecc [][]byte
 
 	// 1. FEC encoding
@@ -573,6 +592,8 @@ func (s *UDPSession) output(buf []byte) {
 		}
 	}
 
+	shouldAddToMeteredQ := important && s.meteredRemote != nil
+
 	// 4. TxQueue
 	var msg ipv4.Message
 	for i := 0; i < s.dup+1; i++ {
@@ -581,6 +602,10 @@ func (s *UDPSession) output(buf []byte) {
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
 		s.txqueue = append(s.txqueue, msg)
+		if shouldAddToMeteredQ {
+			msg.Addr = s.meteredRemote
+			s.meteredTxqueue = append(s.meteredTxqueue, msg)
+		}
 	}
 
 	for k := range ecc {
@@ -589,6 +614,10 @@ func (s *UDPSession) output(buf []byte) {
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
 		s.txqueue = append(s.txqueue, msg)
+		if shouldAddToMeteredQ {
+			msg.Addr = s.meteredRemote
+			s.meteredTxqueue = append(s.meteredTxqueue, msg)
+		}
 	}
 }
 
@@ -663,7 +692,7 @@ func (s *UDPSession) notifyWriteError(err error) {
 }
 
 // packet input stage
-func (s *UDPSession) packetInput(data []byte) {
+func (s *UDPSession) packetInput(data []byte, isFromMeteredIP bool) {
 	decrypted := false
 	if s.block != nil && len(data) >= cryptHeaderSize {
 		s.block.Decrypt(data, data)
@@ -680,11 +709,11 @@ func (s *UDPSession) packetInput(data []byte) {
 	}
 
 	if decrypted && len(data) >= IKCP_OVERHEAD {
-		s.kcpInput(data)
+		s.kcpInput(data, isFromMeteredIP)
 	}
 }
 
-func (s *UDPSession) kcpInput(data []byte) {
+func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 	var kcpInErrors, fecErrs, fecRecovered, fecParityShards uint64
 
 	fecFlag := binary.LittleEndian.Uint16(data[4:])
@@ -703,7 +732,7 @@ func (s *UDPSession) kcpInput(data []byte) {
 			}
 			recovers := s.fecDecoder.decode(f)
 			if f.flag() == typeData {
-				if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, s.ackNoDelay); ret != 0 {
+				if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, isFromMeteredIP, s.ackNoDelay); ret != 0 {
 					kcpInErrors++
 				}
 			}
@@ -712,7 +741,7 @@ func (s *UDPSession) kcpInput(data []byte) {
 				if len(r) >= 2 { // must be larger than 2bytes
 					sz := binary.LittleEndian.Uint16(r)
 					if int(sz) <= len(r) && sz >= 2 {
-						if ret := s.kcp.Input(r[2:sz], false, s.ackNoDelay); ret == 0 {
+						if ret := s.kcp.Input(r[2:sz], false, isFromMeteredIP, s.ackNoDelay); ret == 0 {
 							fecRecovered++
 						} else {
 							kcpInErrors++
@@ -744,7 +773,7 @@ func (s *UDPSession) kcpInput(data []byte) {
 		}
 	} else {
 		s.mu.Lock()
-		if ret := s.kcp.Input(data, true, s.ackNoDelay); ret != 0 {
+		if ret := s.kcp.Input(data, true, isFromMeteredIP, s.ackNoDelay); ret != 0 {
 			kcpInErrors++
 		}
 		if n := s.kcp.PeekSize(); n > 0 {
@@ -785,6 +814,7 @@ type (
 		ownConn      bool           // true if we created conn internally, false if provided by caller
 
 		sessions        map[string]*UDPSession // all sessions accepted by this Listener
+		sessionAlias    map[string]*UDPSession // all sessions accepted by this Listener
 		sessionLock     sync.RWMutex
 		chAccepts       chan *UDPSession // Listen() backlog
 		chSessionClosed chan net.Addr    // session close queue
@@ -819,8 +849,15 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 	}
 
 	if decrypted && len(data) >= IKCP_OVERHEAD {
+		isFromMeteredIP := false
 		l.sessionLock.RLock()
 		s, ok := l.sessions[addr.String()]
+		if !ok {
+			if s, ok = l.sessionAlias[addr.(*net.UDPAddr).IP.String()]; ok {
+				addr = s.remote
+				isFromMeteredIP = true
+			}
+		}
 		l.sessionLock.RUnlock()
 
 		var conv, sn uint32
@@ -842,7 +879,7 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 
 		if ok { // existing connection
 			if !convRecovered || conv == s.kcp.conv { // parity data or valid conversation
-				s.kcpInput(data)
+				s.kcpInput(data, isFromMeteredIP)
 			} else if sn == 0 { // should replace current connection
 				s.Close()
 				s = nil
@@ -852,7 +889,7 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 		if s == nil && convRecovered { // new session
 			if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
 				s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, false, addr, l.block)
-				s.kcpInput(data)
+				s.kcpInput(data, isFromMeteredIP)
 				l.sessionLock.Lock()
 				l.sessions[addr.String()] = s
 				l.sessionLock.Unlock()
@@ -977,10 +1014,22 @@ func (l *Listener) Close() error {
 	return err
 }
 
-// closeSession notify the listener that a session has closed
-func (l *Listener) closeSession(remote net.Addr) (ret bool) {
+func (l *Listener) AddAlternativeIP(remote net.Addr, s *UDPSession) {
 	l.sessionLock.Lock()
 	defer l.sessionLock.Unlock()
+	l.sessionAlias[remote.(*net.UDPAddr).IP.String()] = s
+}
+
+// closeSession notify the listener that a session has closed
+func (l *Listener) closeSession(remote net.Addr, alternativeIP *net.UDPAddr) (ret bool) {
+	l.sessionLock.Lock()
+	defer l.sessionLock.Unlock()
+	if alternativeIP != nil {
+		ip := alternativeIP.IP.String()
+		if _, ok := l.sessionAlias[ip]; ok {
+			delete(l.sessionAlias, ip)
+		}
+	}
 	if _, ok := l.sessions[remote.String()]; ok {
 		delete(l.sessions, remote.String())
 		return true
@@ -1024,6 +1073,7 @@ func serveConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 	l.conn = conn
 	l.ownConn = ownConn
 	l.sessions = make(map[string]*UDPSession)
+	l.sessionAlias = make(map[string]*UDPSession)
 	l.chAccepts = make(chan *UDPSession, acceptBacklog)
 	l.chSessionClosed = make(chan net.Addr)
 	l.die = make(chan struct{})
@@ -1033,6 +1083,31 @@ func serveConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 	l.chSocketReadError = make(chan struct{})
 	go l.monitor()
 	return l, nil
+}
+
+func (s *UDPSession) SetMeteredAddr(raddr string, port uint16) {
+	if raddr != "" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		remoteAddr := ""
+		if port == 0 {
+			remoteAddr = fmt.Sprintf("%s:%d", raddr, s.remote.(*net.UDPAddr).Port)
+		} else {
+			remoteAddr = fmt.Sprintf("%s:%d", raddr, port)
+		}
+		addr, err := net.ResolveUDPAddr("udp", remoteAddr)
+		if err == nil {
+			s.meteredRemote = addr
+			if s.l != nil {
+				s.l.AddAlternativeIP(addr, s)
+			}
+		}
+	}
+}
+
+func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
+	return s.meteredRemote
 }
 
 // Dial connects to the remote address "raddr" on the network "udp" without encryption and FEC
@@ -1046,6 +1121,18 @@ func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr, nil, 0
 //
 // Check https://github.com/klauspost/reedsolomon for details
 func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int) (*UDPSession, error) {
+	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
+	conn, err := listenAt(raddr)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	var convid uint32
+	binary.Read(rand.Reader, binary.LittleEndian, &convid)
+	return newUDPSession(convid, dataShards, parityShards, nil, conn, true, udpaddr, block), nil
+}
+
+func listenAt(raddr string) (*net.UDPConn, error) {
 	// network type detection
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
@@ -1056,14 +1143,7 @@ func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards in
 		network = "udp"
 	}
 
-	conn, err := net.ListenUDP(network, nil)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	var convid uint32
-	binary.Read(rand.Reader, binary.LittleEndian, &convid)
-	return newUDPSession(convid, dataShards, parityShards, nil, conn, true, udpaddr, block), nil
+	return net.ListenUDP(network, nil)
 }
 
 // NewConn3 establishes a session and talks KCP protocol over a packet connection.

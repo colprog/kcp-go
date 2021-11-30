@@ -25,7 +25,7 @@ package kcp
 import "golang.org/x/net/ipv4"
 
 const (
-	batchSize = 16
+	batchSize = 32
 )
 
 type batchConn interface {
