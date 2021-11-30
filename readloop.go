@@ -1,6 +1,7 @@
 package kcp
 
 import (
+	"net"
 	"sync/atomic"
 
 	"github.com/pkg/errors"
@@ -12,13 +13,15 @@ func (s *UDPSession) defaultReadLoop() {
 	for {
 		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
 			// make sure the packet is from the same source
-			if src == "" { // set source address
+			isFromMeteredIP := s.isFromMeteredIP(addr)
+			if isFromMeteredIP {
+			} else if src == "" { // set source address
 				src = addr.String()
 			} else if addr.String() != src {
 				atomic.AddUint64(&DefaultSnmp.InErrs, 1)
 				continue
 			}
-			s.packetInput(buf[:n])
+			s.packetInput(buf[:n], isFromMeteredIP)
 		} else {
 			s.notifyReadError(errors.WithStack(err))
 			return
@@ -36,4 +39,19 @@ func (l *Listener) defaultMonitor() {
 			return
 		}
 	}
+}
+
+func (s *UDPSession) isFromMeteredIP(addr net.Addr) bool {
+	if s.meteredRemote == nil {
+		return false
+	}
+
+	switch addr := addr.(type) {
+	case *net.UDPAddr:
+		return addr.IP.Equal(s.meteredRemote.IP)
+	case *net.TCPAddr:
+		return addr.IP.Equal(s.meteredRemote.IP)
+	}
+
+	return false
 }

@@ -32,7 +32,9 @@ func (s *UDPSession) readLoop() {
 			for i := 0; i < count; i++ {
 				msg := &msgs[i]
 				// make sure the packet is from the same source
-				if src == "" { // set source address if nil
+				isFromMeteredIP := s.isFromMeteredIP(msg.Addr)
+				if isFromMeteredIP {
+				} else if src == "" { // set source address if nil
 					src = msg.Addr.String()
 				} else if msg.Addr.String() != src {
 					atomic.AddUint64(&DefaultSnmp.InErrs, 1)
@@ -40,7 +42,7 @@ func (s *UDPSession) readLoop() {
 				}
 
 				// source and size has validated
-				s.packetInput(msg.Buffers[0][:msg.N])
+				s.packetInput(msg.Buffers[0][:msg.N], isFromMeteredIP)
 			}
 		} else {
 			// compatibility issue:
