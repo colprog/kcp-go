@@ -144,6 +144,9 @@ type KCP struct {
 	ts_probe, probe_wait                   uint32
 	dead_link, incr                        uint32
 
+	send_all_acks_through_metered_ip bool
+	metered_ip_aggressiveness        int
+
 	fastresend     int32
 	fastacklimit   int32
 	nocwnd, stream int32
@@ -187,6 +190,8 @@ func NewKCP(conv uint32, output output_callback) *KCP {
 	kcp.dead_link = IKCP_DEADLINK
 	kcp.output = output
 	kcp.fastacklimit = IKCP_FASTACK_LIMIT
+	kcp.send_all_acks_through_metered_ip = false
+	kcp.metered_ip_aggressiveness = 0
 	return kcp
 }
 
@@ -684,7 +689,8 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 	buffer := kcp.buffer
 	ptr := buffer[kcp.reserved:] // keep n bytes untouched
-	sendAllAcksMetered := false
+	sendAllAcksMetered := kcp.send_all_acks_through_metered_ip
+	aggressiveness := kcp.metered_ip_aggressiveness
 
 	// makeSpace makes room for writing
 	makeSpace := func(space int, important bool) bool {
@@ -800,7 +806,11 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		kcp.snd_queue = kcp.remove_front(kcp.snd_queue, newSegsCount)
 	} else {
 		// 滑动窗口若无进展（窗口满或无新数据），提高发送优先级，希望能推动窗口进展
-		promoteToImportant = true
+		if aggressiveness >= 1 {
+			promoteToImportant = true
+		} else {
+			promoteToImportant = flushACK(true) || promoteToImportant
+		}
 	}
 
 	// calculate resent
@@ -1038,6 +1048,11 @@ func (kcp *KCP) SetMtu(mtu int) int {
 	kcp.mss = kcp.mtu - IKCP_OVERHEAD - uint32(kcp.reserved)
 	kcp.buffer = buffer
 	return 0
+}
+
+func (kcp *KCP) ConfigMeteredIpUsage(all_acks bool, aggressiveness int) {
+	kcp.send_all_acks_through_metered_ip = all_acks
+	kcp.metered_ip_aggressiveness = aggressiveness
 }
 
 // NoDelay options
