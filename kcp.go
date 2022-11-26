@@ -2,6 +2,7 @@ package kcp
 
 import (
 	"encoding/binary"
+	"math/rand"
 	"sync/atomic"
 	"time"
 )
@@ -173,8 +174,8 @@ type ackItem struct {
 // 'conv' must be equal in the connection peers, or else data will be silently rejected.
 //
 // 'output' function will be called whenever these is data to be sent on wire.
-func NewKCP(conv uint32, output output_callback) *KCP {
-	kcp := new(KCP)
+func NewKCP(conv uint32, output output_callback) *DropKCP {
+	kcp := new(DropKCP)
 	kcp.conv = conv
 	kcp.snd_wnd = IKCP_WND_SND
 	kcp.rcv_wnd = IKCP_WND_RCV
@@ -192,6 +193,17 @@ func NewKCP(conv uint32, output output_callback) *KCP {
 	kcp.fastacklimit = IKCP_FASTACK_LIMIT
 	kcp.send_all_acks_through_metered_ip = false
 	kcp.metered_ip_aggressiveness = 0
+	return kcp
+}
+
+func NewKCPWithDrop(conv uint32, output output_callback, dropRate float64, dropOn bool) *DropKCP {
+	kcp := NewKCP(conv, output)
+	kcp.setDropRate(dropRate)
+	if dropOn {
+		kcp.dropOpen()
+	} else {
+		kcp.dropOff()
+	}
 	return kcp
 }
 
@@ -1129,4 +1141,36 @@ func (kcp *KCP) ReleaseTX() {
 	}
 	kcp.snd_queue = nil
 	kcp.snd_buf = nil
+}
+
+/// MOCK kcp
+
+type DropKCP struct {
+	KCP
+	dropRate float64
+	dropOn   bool
+}
+
+func (dkcp *DropKCP) dropOpen() {
+	dkcp.dropOn = true
+}
+
+func (dkcp *DropKCP) dropOff() {
+	dkcp.dropOn = false
+}
+
+func (dkcp *DropKCP) setDropRate(dropRate float64) {
+	dkcp.dropRate = dropRate
+}
+
+func (dkcp *DropKCP) parse_ack(sn uint32) {
+	shouldDrop := func(rate float64) bool {
+		rand.Seed(time.Now().UnixNano())
+		r := rand.Intn(1000)
+		return r < int(rate*1000)
+	}
+
+	if !dkcp.dropOn || !shouldDrop(dkcp.dropRate) {
+		dkcp.KCP.parse_ack(sn)
+	}
 }

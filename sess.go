@@ -63,7 +63,7 @@ type (
 	UDPSession struct {
 		conn    net.PacketConn // the underlying packet connection
 		ownConn bool           // true if we created conn internally, false if provided by caller
-		kcp     *KCP           // KCP ARQ protocol
+		kcp     *DropKCP       // KCP ARQ protocol
 		l       *Listener      // pointing to the Listener object if it's been accepted by a Listener
 		block   BlockCrypt     // block encryption object
 
@@ -182,11 +182,11 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 		sess.headerSize += fecHeaderSizePlus2
 	}
 
-	sess.kcp = NewKCP(conv, func(buf []byte, size int, important bool) {
+	sess.kcp = NewKCPWithDrop(conv, func(buf []byte, size int, important bool) {
 		if size >= IKCP_OVERHEAD+sess.headerSize {
 			sess.output(buf[:size], important)
 		}
-	})
+	}, l.dropKcpAckRate, l.dropOn)
 	sess.kcp.ReserveBytes(sess.headerSize)
 
 	if sess.l == nil { // it's a client connection
@@ -815,8 +815,26 @@ type (
 		socketReadErrorOnce sync.Once
 
 		rd atomic.Value // read deadline for Accept()
+
+		dropKcpAckRate float64
+		dropOn         bool
 	}
 )
+
+func (listen *Listener) dropOpen() {
+	listen.dropOn = true
+	for _, session := range listen.sessions {
+		session.kcp.setDropRate(listen.dropKcpAckRate)
+		session.kcp.dropOpen()
+	}
+}
+
+func (listen *Listener) dropOff() {
+	listen.dropOn = false
+	for _, session := range listen.sessions {
+		session.kcp.dropOff()
+	}
+}
 
 // packet input stage
 func (l *Listener) packetInput(data []byte, addr net.Addr) {
@@ -1028,7 +1046,13 @@ func (l *Listener) closeSession(remote net.Addr, alternativeIP *net.UDPAddr) (re
 func (l *Listener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 // Listen listens for incoming KCP packets addressed to the local address laddr on the network "udp",
-func Listen(laddr string) (net.Listener, error) { return ListenWithOptions(laddr, nil, 0, 0) }
+func Listen(laddr string) (*Listener, error) { return ListenWithOptions(laddr, nil, 0, 0) }
+
+func ListenWithDrop(laddr string, dropRate float64) (*Listener, error) {
+	l, err := ListenWithOptions(laddr, nil, 0, 0)
+	l.dropKcpAckRate = dropRate
+	return l, err
+}
 
 // ListenWithOptions listens for incoming KCP packets addressed to the local address laddr on the network "udp" with packet encryption.
 //
