@@ -63,7 +63,7 @@ type (
 	UDPSession struct {
 		conn    net.PacketConn // the underlying packet connection
 		ownConn bool           // true if we created conn internally, false if provided by caller
-		kcp     *DropKCP       // KCP ARQ protocol
+		kcp     *KCP           // KCP ARQ protocol
 		l       *Listener      // pointing to the Listener object if it's been accepted by a Listener
 		block   BlockCrypt     // block encryption object
 
@@ -182,11 +182,20 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 		sess.headerSize += fecHeaderSizePlus2
 	}
 
-	sess.kcp = NewKCPWithDrop(conv, func(buf []byte, size int, important bool) {
-		if size >= IKCP_OVERHEAD+sess.headerSize {
-			sess.output(buf[:size], important)
-		}
-	}, l.dropKcpAckRate, l.dropOn)
+	if l != nil {
+		sess.kcp = NewKCPWithDrop(conv, func(buf []byte, size int, important bool) {
+			if size >= IKCP_OVERHEAD+sess.headerSize {
+				sess.output(buf[:size], important)
+			}
+		}, l.dropKcpAckRate, l.dropOn)
+	} else {
+		sess.kcp = NewKCP(conv, func(buf []byte, size int, important bool) {
+			if size >= IKCP_OVERHEAD+sess.headerSize {
+				sess.output(buf[:size], important)
+			}
+		})
+	}
+
 	sess.kcp.ReserveBytes(sess.headerSize)
 
 	if sess.l == nil { // it's a client connection
@@ -857,6 +866,7 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 		isFromMeteredIP := false
 		l.sessionLock.RLock()
 		s, ok := l.sessions[addr.String()]
+
 		if !ok {
 			if s, ok = l.sessionAlias[addr.(*net.UDPAddr).IP.String()]; ok {
 				addr = s.remote
@@ -864,6 +874,8 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 			}
 		}
 		l.sessionLock.RUnlock()
+
+		// TBD : isFromMeteredIP will not work in loopback
 
 		var conv, sn uint32
 		convRecovered := false
@@ -1025,6 +1037,12 @@ func (l *Listener) AddAlternativeIP(remote net.Addr, s *UDPSession) {
 	l.sessionAlias[remote.(*net.UDPAddr).IP.String()] = s
 }
 
+func (l *Listener) AddAlternativeIPForce(remote string, s *UDPSession) {
+	l.sessionLock.Lock()
+	defer l.sessionLock.Unlock()
+	l.sessionAlias[remote] = s
+}
+
 // closeSession notify the listener that a session has closed
 func (l *Listener) closeSession(remote net.Addr, alternativeIP *net.UDPAddr) (ret bool) {
 	l.sessionLock.Lock()
@@ -1051,6 +1069,7 @@ func Listen(laddr string) (*Listener, error) { return ListenWithOptions(laddr, n
 func ListenWithDrop(laddr string, dropRate float64) (*Listener, error) {
 	l, err := ListenWithOptions(laddr, nil, 0, 0)
 	l.dropKcpAckRate = dropRate
+	l.dropOpen()
 	return l, err
 }
 
@@ -1096,7 +1115,7 @@ func serveConn(block BlockCrypt, dataShards, parityShards int, conn net.PacketCo
 	return l, nil
 }
 
-func (s *UDPSession) SetMeteredAddr(raddr string, port uint16) {
+func (s *UDPSession) SetMeteredAddr(raddr string, port uint16, force bool) error {
 	if raddr != "" {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -1108,13 +1127,27 @@ func (s *UDPSession) SetMeteredAddr(raddr string, port uint16) {
 			remoteAddr = fmt.Sprintf("%s:%d", raddr, port)
 		}
 		addr, err := net.ResolveUDPAddr("udp", remoteAddr)
-		if err == nil {
-			s.meteredRemote = addr
-			if s.l != nil {
-				s.l.AddAlternativeIP(addr, s)
-			}
+		if err != nil {
+			return err
+
 		}
+
+		if s.l == nil {
+			return errors.New("no listener.")
+		}
+
+		s.meteredRemote = addr
+		if force {
+			s.l.AddAlternativeIPForce(raddr, s)
+		} else {
+			s.l.AddAlternativeIP(addr, s)
+		}
+
+	} else {
+		return errors.New("invalid raddr")
 	}
+
+	return nil
 }
 
 func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
@@ -1122,7 +1155,14 @@ func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
 }
 
 // Dial connects to the remote address "raddr" on the network "udp" without encryption and FEC
-func Dial(raddr string) (net.Conn, error) { return DialWithOptions(raddr, nil, 0, 0) }
+func Dial(raddr string) (*UDPSession, error) { return DialWithOptions(raddr, nil, 0, 0) }
+
+func DialWithDrop(raddr string, dropRate float64) (*UDPSession, error) {
+	s, err := DialWithOptions(raddr, nil, 0, 0)
+	s.kcp.setDropRate(dropRate)
+	s.kcp.dropOpen()
+	return s, err
+}
 
 // DialWithOptions connects to the remote address "raddr" on the network "udp" with packet encryption
 //

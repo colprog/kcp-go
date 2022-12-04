@@ -162,6 +162,10 @@ type KCP struct {
 	buffer   []byte
 	reserved int
 	output   output_callback
+
+	// drop
+	dropRate float64
+	dropOn   bool
 }
 
 type ackItem struct {
@@ -174,8 +178,8 @@ type ackItem struct {
 // 'conv' must be equal in the connection peers, or else data will be silently rejected.
 //
 // 'output' function will be called whenever these is data to be sent on wire.
-func NewKCP(conv uint32, output output_callback) *DropKCP {
-	kcp := new(DropKCP)
+func NewKCP(conv uint32, output output_callback) *KCP {
+	kcp := new(KCP)
 	kcp.conv = conv
 	kcp.snd_wnd = IKCP_WND_SND
 	kcp.rcv_wnd = IKCP_WND_RCV
@@ -196,7 +200,7 @@ func NewKCP(conv uint32, output output_callback) *DropKCP {
 	return kcp
 }
 
-func NewKCPWithDrop(conv uint32, output output_callback, dropRate float64, dropOn bool) *DropKCP {
+func NewKCPWithDrop(conv uint32, output output_callback, dropRate float64, dropOn bool) *KCP {
 	kcp := NewKCP(conv, output)
 	kcp.setDropRate(dropRate)
 	if dropOn {
@@ -474,6 +478,7 @@ func (kcp *KCP) parse_una(una uint32) int {
 			break
 		}
 	}
+
 	if count > 0 {
 		kcp.snd_buf = kcp.remove_front(kcp.snd_buf, count)
 	}
@@ -558,6 +563,16 @@ func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool) int {
 	var flag int
 	var inSegs uint64
 	var windowSlides bool
+
+	shouldDrop := func(rate float64) bool {
+		rand.Seed(time.Now().UnixNano())
+		r := rand.Intn(1000)
+		return r < int(rate*1000)
+	}
+
+	if kcp.dropOn && shouldDrop(kcp.dropRate) {
+		data = data[:0]
+	}
 
 	for {
 		var ts, sn, length, una, conv uint32
@@ -844,6 +859,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	}
 
 	ref := kcp.snd_buf[:sndBufLen] // for bounds check elimination
+
 	for k := range ref {
 		segment := &ref[k]
 		needsend := false
@@ -1143,34 +1159,15 @@ func (kcp *KCP) ReleaseTX() {
 	kcp.snd_buf = nil
 }
 
-/// MOCK kcp
-
-type DropKCP struct {
-	KCP
-	dropRate float64
-	dropOn   bool
-}
-
-func (dkcp *DropKCP) dropOpen() {
+// support drop
+func (dkcp *KCP) dropOpen() {
 	dkcp.dropOn = true
 }
 
-func (dkcp *DropKCP) dropOff() {
+func (dkcp *KCP) dropOff() {
 	dkcp.dropOn = false
 }
 
-func (dkcp *DropKCP) setDropRate(dropRate float64) {
+func (dkcp *KCP) setDropRate(dropRate float64) {
 	dkcp.dropRate = dropRate
-}
-
-func (dkcp *DropKCP) parse_ack(sn uint32) {
-	shouldDrop := func(rate float64) bool {
-		rand.Seed(time.Now().UnixNano())
-		r := rand.Intn(1000)
-		return r < int(rate*1000)
-	}
-
-	if !dkcp.dropOn || !shouldDrop(dkcp.dropRate) {
-		dkcp.KCP.parse_ack(sn)
-	}
 }
