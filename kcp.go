@@ -564,14 +564,16 @@ func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool) int {
 	var inSegs uint64
 	var windowSlides bool
 
-	shouldDrop := func(rate float64) bool {
-		rand.Seed(time.Now().UnixNano())
-		r := rand.Intn(1000)
-		return r < int(rate*1000)
-	}
+	if !fromMetered {
+		shouldDrop := func(rate float64) bool {
+			rand.Seed(time.Now().UnixNano())
+			r := rand.Intn(1000)
+			return r < int(rate*1000)
+		}
 
-	if kcp.dropOn && shouldDrop(kcp.dropRate) {
-		data = data[:0]
+		if kcp.dropOn && shouldDrop(kcp.dropRate) {
+			data = data[:0]
+		}
 	}
 
 	for {

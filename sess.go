@@ -288,6 +288,7 @@ func (s *UDPSession) Write(b []byte) (n int, err error) { return s.WriteBuffers(
 
 // WriteBuffers write a vector of byte slices to the underlying connection
 func (s *UDPSession) WriteBuffers(v [][]byte) (n int, err error) {
+
 	for {
 		select {
 		case <-s.chSocketWriteError:
@@ -1127,16 +1128,18 @@ func (s *UDPSession) SetMeteredAddr(raddr string, port uint16, force bool) error
 			remoteAddr = fmt.Sprintf("%s:%d", raddr, port)
 		}
 		addr, err := net.ResolveUDPAddr("udp", remoteAddr)
+
 		if err != nil {
 			return err
-
-		}
-
-		if s.l == nil {
-			return errors.New("no listener.")
 		}
 
 		s.meteredRemote = addr
+
+		if s.l == nil {
+			// If no listener, just return.
+			return nil
+		}
+
 		if force {
 			s.l.AddAlternativeIPForce(raddr, s)
 		} else {

@@ -10,6 +10,7 @@ func (s *UDPSession) defaultTx() {
 	nbytes := 0
 	npkts := 0
 	for k := range s.txqueue {
+
 		if n, err := s.conn.WriteTo(s.txqueue[k].Buffers[0], s.txqueue[k].Addr); err == nil {
 			nbytes += n
 			npkts++
@@ -20,6 +21,7 @@ func (s *UDPSession) defaultTx() {
 	}
 	if s.meteredRemote != nil {
 		for k := range s.meteredTxqueue {
+
 			if n, err := s.conn.WriteTo(s.meteredTxqueue[k].Buffers[0], s.meteredTxqueue[k].Addr); err == nil {
 				nbytes += n
 				npkts++

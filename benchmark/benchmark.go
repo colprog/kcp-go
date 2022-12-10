@@ -14,26 +14,22 @@ import (
 
 type (
 	BenchmarkOps struct {
-		min_buffer_size  int     `json:"min_buffer_size"`
-		max_buffer_size  int     `json:"max_buffer_size"`
-		remote_address   string  `json:"remote_address"`
-		slow_rate        float64 `json:"slow_rate"`
-		data_random_mode int     `json:"data_random_mode"`
-		remote_slow_port int     `json:"remote_slow_port"`
+		min_buffer_size        int     `json:"min_buffer_size"`
+		max_buffer_size        int     `json:"max_buffer_size"`
+		remote_address         string  `json:"remote_address"`
+		slow_rate              float64 `json:"slow_rate"`
+		data_random_mode       int     `json:"data_random_mode"`
+		remote_slow_port       int     `json:"remote_slow_port"`
+		remote_metered_address string  `json:"remote_metered_address"`
 	}
 
 	BnechServerOps struct {
 		listen_slow_port int     `json:"listen_slow_port"`
 		drop_rate        float64 `json:"drop_rate"`
 		max_buffer_size  int     `json:"max_buffer_size"`
+		metered_address  string  `json:"metered_address"`
 	}
 )
-
-func setupLoopUpIps() error {
-	// TBD
-	// sudo ifconfig lo0 alias 127.0.0.2
-	return nil
-}
 
 func main() {
 	serverMode := false
@@ -48,6 +44,7 @@ func main() {
 				Name:  "bench_server",
 				Usage: "Running as bench server",
 				Flags: []cli.Flag{
+
 					&cli.IntFlag{
 						Name:  "listen_slow_port",
 						Usage: "Server size listen to slow port.",
@@ -76,6 +73,13 @@ func main() {
 							return nil
 						},
 					},
+					&cli.StringFlag{
+						Name:  "metered_address",
+						Usage: "Meter ip address.",
+						Action: func(ctx *cli.Context, v string) error {
+							return nil
+						},
+					},
 				},
 				Action: func(c *cli.Context) error {
 					serverMode = true
@@ -83,7 +87,11 @@ func main() {
 					benchSerOps.listen_slow_port = c.Int("listen_slow_port")
 					benchSerOps.drop_rate = c.Float64("drop_rate")
 					benchSerOps.max_buffer_size = c.Int("max_buffer_size")
-					return setupLoopUpIps()
+					benchSerOps.metered_address = c.String("metered_address")
+					if len(benchSerOps.metered_address) == 0 {
+						return errors.New("invalid metered_address")
+					}
+					return nil
 				},
 			},
 		},
@@ -114,7 +122,15 @@ func main() {
 			&cli.StringFlag{
 				Name:  "remote_address",
 				Usage: "Remote ip address.",
-				Value: "127.0.0.1",
+				Value: "0.0.0.0",
+				Action: func(ctx *cli.Context, v string) error {
+					// todo: check
+					return nil
+				},
+			},
+			&cli.StringFlag{
+				Name:  "remote_metered_address",
+				Usage: "Remote metered ip address.",
 				Action: func(ctx *cli.Context, v string) error {
 					// todo: check
 					return nil
@@ -157,7 +173,11 @@ func main() {
 			benchOps.slow_rate = c.Float64("slow_rate")
 			benchOps.data_random_mode = c.Int("data_random_mode")
 			benchOps.remote_slow_port = c.Int("remote_slow_port")
-			return setupLoopUpIps()
+			benchOps.remote_metered_address = c.String("remote_metered_address")
+			if len(benchOps.remote_metered_address) == 0 {
+				return errors.New("invalid remote_metered_address")
+			}
+			return nil
 		},
 	}
 
@@ -224,7 +244,7 @@ func getRandomData(randMode int, minSize int, maxSize int) ([]byte, int, error) 
 
 func startServer(args *BnechServerOps) error {
 	log.Printf("Benchmark server side started. options: %+v \n", args)
-	listenSlowAddrStr := fmt.Sprintf("%s:%d", "127.0.0.1", args.listen_slow_port)
+	listenSlowAddrStr := fmt.Sprintf("%s:%d", "0.0.0.0", args.listen_slow_port)
 
 	log.Println("Server slow path listen to:", listenSlowAddrStr)
 	slowListener, err := kcp.ListenWithDrop(listenSlowAddrStr, args.drop_rate)
@@ -234,7 +254,7 @@ func startServer(args *BnechServerOps) error {
 
 	for {
 		s, err := slowListener.AcceptKCP()
-		s.SetMeteredAddr("127.0.0.2", 10086, true)
+		s.SetMeteredAddr(args.metered_address, uint16(args.listen_slow_port), true)
 		log.Println("Server slow path got session on")
 		if err != nil {
 			return err
@@ -263,7 +283,7 @@ func start(args *BenchmarkOps) error {
 	remoteSlowAddrStr := fmt.Sprintf("%s:%d", args.remote_address, args.remote_slow_port)
 	log.Println("Connect to:", remoteSlowAddrStr)
 	if sess, err := kcp.Dial(remoteSlowAddrStr); err == nil {
-		sess.SetMeteredAddr("127.0.0.2", uint16(args.remote_slow_port), true)
+		sess.SetMeteredAddr(args.remote_metered_address, uint16(args.remote_slow_port), true)
 
 		for {
 			data, dataLen, err := getRandomData(args.data_random_mode, args.min_buffer_size, args.max_buffer_size)
@@ -277,7 +297,6 @@ func start(args *BenchmarkOps) error {
 				return err
 			}
 
-			time.Sleep(time.Second)
 		}
 	} else {
 		return err
