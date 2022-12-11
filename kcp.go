@@ -572,6 +572,7 @@ func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool) int {
 		}
 
 		if kcp.dropOn && shouldDrop(kcp.dropRate) {
+			atomic.AddUint64(&DefaultSnmp.BytesDropt, uint64(len(data)))
 			data = data[:0]
 		}
 	}
