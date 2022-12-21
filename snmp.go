@@ -9,6 +9,7 @@ import (
 type Snmp struct {
 	BytesSent        uint64 // bytes sent from upper level
 	BytesReceived    uint64 // bytes received to upper level
+	BytesDropt       uint64 //bytes dropped in testing mode
 	MaxConn          uint64 // max number of connections ever reached
 	ActiveOpens      uint64 // accumulated active open connections
 	PassiveOpens     uint64 // accumulated passive open connections
@@ -73,6 +74,7 @@ func (s *Snmp) ToSlice() []string {
 	return []string{
 		fmt.Sprint(snmp.BytesSent),
 		fmt.Sprint(snmp.BytesReceived),
+		fmt.Sprint(snmp.BytesDropt),
 		fmt.Sprint(snmp.MaxConn),
 		fmt.Sprint(snmp.ActiveOpens),
 		fmt.Sprint(snmp.PassiveOpens),
@@ -98,11 +100,45 @@ func (s *Snmp) ToSlice() []string {
 	}
 }
 
+func (s *Snmp) ToString() string {
+	snmp := s.Copy()
+
+	snapStr := "Snap Status:\n"
+	snapStr += fmt.Sprintf("BytesSent: %d\n", snmp.BytesSent)
+	snapStr += fmt.Sprintf("BytesReceived: %d\n", snmp.BytesReceived)
+	snapStr += fmt.Sprintf("BytesDropt: %d\n", snmp.BytesDropt)
+	snapStr += fmt.Sprintf("MaxConn: %d\n", snmp.MaxConn)
+	snapStr += fmt.Sprintf("ActiveOpens: %d\n", snmp.ActiveOpens)
+	snapStr += fmt.Sprintf("PassiveOpens: %d\n", snmp.PassiveOpens)
+	snapStr += fmt.Sprintf("CurrEstab: %d\n", snmp.CurrEstab)
+	snapStr += fmt.Sprintf("InErrs: %d\n", snmp.InErrs)
+	snapStr += fmt.Sprintf("InCsumErrors: %d\n", snmp.InCsumErrors)
+	snapStr += fmt.Sprintf("KCPInErrors: %d\n", snmp.KCPInErrors)
+	snapStr += fmt.Sprintf("InPkts: %d\n", snmp.InPkts)
+	snapStr += fmt.Sprintf("OutPkts: %d\n", snmp.OutPkts)
+	snapStr += fmt.Sprintf("InSegs: %d\n", snmp.InSegs)
+	snapStr += fmt.Sprintf("OutSegs: %d\n", snmp.OutSegs)
+	snapStr += fmt.Sprintf("InBytes: %d\n", snmp.InBytes)
+	snapStr += fmt.Sprintf("OutBytes: %d\n", snmp.OutBytes)
+	snapStr += fmt.Sprintf("RetransSegs: %d\n", snmp.RetransSegs)
+	snapStr += fmt.Sprintf("FastRetransSegs: %d\n", snmp.FastRetransSegs)
+	snapStr += fmt.Sprintf("EarlyRetransSegs: %d\n", snmp.EarlyRetransSegs)
+	snapStr += fmt.Sprintf("LostSegs: %d\n", snmp.LostSegs)
+	snapStr += fmt.Sprintf("RepeatSegs: %d\n", snmp.RepeatSegs)
+	snapStr += fmt.Sprintf("FECParityShards: %d\n", snmp.FECParityShards)
+	snapStr += fmt.Sprintf("FECErrs: %d\n", snmp.FECErrs)
+	snapStr += fmt.Sprintf("FECRecovered: %d\n", snmp.FECRecovered)
+	snapStr += fmt.Sprintf("FECShortShards: %d\n", snmp.FECShortShards)
+
+	return snapStr
+}
+
 // Copy make a copy of current snmp snapshot
 func (s *Snmp) Copy() *Snmp {
 	d := newSnmp()
 	d.BytesSent = atomic.LoadUint64(&s.BytesSent)
 	d.BytesReceived = atomic.LoadUint64(&s.BytesReceived)
+	d.BytesDropt = atomic.LoadUint64(&s.BytesDropt)
 	d.MaxConn = atomic.LoadUint64(&s.MaxConn)
 	d.ActiveOpens = atomic.LoadUint64(&s.ActiveOpens)
 	d.PassiveOpens = atomic.LoadUint64(&s.PassiveOpens)
@@ -132,6 +168,7 @@ func (s *Snmp) Copy() *Snmp {
 func (s *Snmp) Reset() {
 	atomic.StoreUint64(&s.BytesSent, 0)
 	atomic.StoreUint64(&s.BytesReceived, 0)
+	atomic.StoreUint64(&s.BytesDropt, 0)
 	atomic.StoreUint64(&s.MaxConn, 0)
 	atomic.StoreUint64(&s.ActiveOpens, 0)
 	atomic.StoreUint64(&s.PassiveOpens, 0)

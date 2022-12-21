@@ -2,6 +2,7 @@ package kcp
 
 import (
 	"encoding/binary"
+	"math/rand"
 	"sync/atomic"
 	"time"
 )
@@ -161,6 +162,10 @@ type KCP struct {
 	buffer   []byte
 	reserved int
 	output   output_callback
+
+	// drop
+	dropRate float64
+	dropOn   bool
 }
 
 type ackItem struct {
@@ -192,6 +197,17 @@ func NewKCP(conv uint32, output output_callback) *KCP {
 	kcp.fastacklimit = IKCP_FASTACK_LIMIT
 	kcp.send_all_acks_through_metered_ip = false
 	kcp.metered_ip_aggressiveness = 0
+	return kcp
+}
+
+func NewKCPWithDrop(conv uint32, output output_callback, dropRate float64, dropOn bool) *KCP {
+	kcp := NewKCP(conv, output)
+	kcp.setDropRate(dropRate)
+	if dropOn {
+		kcp.dropOpen()
+	} else {
+		kcp.dropOff()
+	}
 	return kcp
 }
 
@@ -462,6 +478,7 @@ func (kcp *KCP) parse_una(una uint32) int {
 			break
 		}
 	}
+
 	if count > 0 {
 		kcp.snd_buf = kcp.remove_front(kcp.snd_buf, count)
 	}
@@ -546,6 +563,19 @@ func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool) int {
 	var flag int
 	var inSegs uint64
 	var windowSlides bool
+
+	if !fromMetered {
+		shouldDrop := func(rate float64) bool {
+			rand.Seed(time.Now().UnixNano())
+			r := rand.Intn(1000)
+			return r < int(rate*1000)
+		}
+
+		if kcp.dropOn && shouldDrop(kcp.dropRate) {
+			atomic.AddUint64(&DefaultSnmp.BytesDropt, uint64(len(data)))
+			data = data[:0]
+		}
+	}
 
 	for {
 		var ts, sn, length, una, conv uint32
@@ -832,6 +862,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	}
 
 	ref := kcp.snd_buf[:sndBufLen] // for bounds check elimination
+
 	for k := range ref {
 		segment := &ref[k]
 		needsend := false
@@ -1129,4 +1160,17 @@ func (kcp *KCP) ReleaseTX() {
 	}
 	kcp.snd_queue = nil
 	kcp.snd_buf = nil
+}
+
+// support drop
+func (dkcp *KCP) dropOpen() {
+	dkcp.dropOn = true
+}
+
+func (dkcp *KCP) dropOff() {
+	dkcp.dropOn = false
+}
+
+func (dkcp *KCP) setDropRate(dropRate float64) {
+	dkcp.dropRate = dropRate
 }

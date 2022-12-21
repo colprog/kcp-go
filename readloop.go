@@ -14,8 +14,7 @@ func (s *UDPSession) defaultReadLoop() {
 		if n, addr, err := s.conn.ReadFrom(buf); err == nil {
 			// make sure the packet is from the same source
 			isFromMeteredIP := s.isFromMeteredIP(addr)
-			if isFromMeteredIP {
-			} else if src == "" { // set source address
+			if !isFromMeteredIP && src == "" { // set source address
 				src = addr.String()
 			} else if addr.String() != src {
 				atomic.AddUint64(&DefaultSnmp.InErrs, 1)
