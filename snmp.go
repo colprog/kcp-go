@@ -9,7 +9,7 @@ import (
 type Snmp struct {
 	BytesSent        uint64 // bytes sent from upper level
 	BytesReceived    uint64 // bytes received to upper level
-	BytesDropt       uint64 //bytes dropped in testing mode
+	BytesDropt       uint64 // bytes dropped in testing mode
 	MaxConn          uint64 // max number of connections ever reached
 	ActiveOpens      uint64 // accumulated active open connections
 	PassiveOpens     uint64 // accumulated passive open connections
@@ -32,6 +32,13 @@ type Snmp struct {
 	FECErrs          uint64 // incorrect packets recovered from FEC
 	FECParityShards  uint64 // FEC segments received
 	FECShortShards   uint64 // number of data shards that's not enough for recovery
+
+	BytesSentFromNoMeteredRaw     uint64 // bytes send(raw) which not from metered ip
+	BytesSentFromMeteredRaw       uint64 // bytes send(raw) which from metered ip
+	BytesReceivedFromNoMeteredRaw uint64 // bytes received(raw) which not from metered ip
+	BytesReceivedFromMeteredRaw   uint64 // bytes received(raw) which from metered ip
+	SegmentNumbersACKed           uint64 // the numbers of segment which have been acked
+	SegmentNumbersPromotedACKed   uint64 // the numbers of segment which have been acked and been promoted
 }
 
 func newSnmp() *Snmp {
@@ -65,6 +72,13 @@ func (s *Snmp) Header() []string {
 		"FECErrs",
 		"FECRecovered",
 		"FECShortShards",
+
+		"BytesSentFromNoMeteredRaw",
+		"BytesSentFromMeteredRaw",
+		"BytesReceivedFromNoMeteredRaw",
+		"BytesReceivedFromMeteredRaw",
+		"SegmentNumbersACKed",
+		"SegmentNumbersPromotedACKed",
 	}
 }
 
@@ -97,6 +111,13 @@ func (s *Snmp) ToSlice() []string {
 		fmt.Sprint(snmp.FECErrs),
 		fmt.Sprint(snmp.FECRecovered),
 		fmt.Sprint(snmp.FECShortShards),
+
+		fmt.Sprint(snmp.BytesSentFromNoMeteredRaw),
+		fmt.Sprint(snmp.BytesSentFromMeteredRaw),
+		fmt.Sprint(snmp.BytesReceivedFromNoMeteredRaw),
+		fmt.Sprint(snmp.BytesReceivedFromMeteredRaw),
+		fmt.Sprint(snmp.SegmentNumbersACKed),
+		fmt.Sprint(snmp.SegmentNumbersPromotedACKed),
 	}
 }
 
@@ -130,6 +151,13 @@ func (s *Snmp) ToString() string {
 	snapStr += fmt.Sprintf("FECRecovered: %d\n", snmp.FECRecovered)
 	snapStr += fmt.Sprintf("FECShortShards: %d\n", snmp.FECShortShards)
 
+	snapStr += fmt.Sprintf("BytesSentFromNoMeteredRaw: %d\n", snmp.BytesSentFromNoMeteredRaw)
+	snapStr += fmt.Sprintf("BytesSentFromMeteredRaw: %d\n", snmp.BytesSentFromMeteredRaw)
+	snapStr += fmt.Sprintf("BytesReceivedFromNoMeteredRaw: %d\n", snmp.BytesReceivedFromNoMeteredRaw)
+	snapStr += fmt.Sprintf("BytesReceivedFromMeteredRaw: %d\n", snmp.BytesReceivedFromMeteredRaw)
+	snapStr += fmt.Sprintf("SegmentNumbersACKed: %d\n", snmp.SegmentNumbersACKed)
+	snapStr += fmt.Sprintf("SegmentNumbersPromotedACKed: %d\n", snmp.SegmentNumbersPromotedACKed)
+
 	return snapStr
 }
 
@@ -161,6 +189,13 @@ func (s *Snmp) Copy() *Snmp {
 	d.FECErrs = atomic.LoadUint64(&s.FECErrs)
 	d.FECRecovered = atomic.LoadUint64(&s.FECRecovered)
 	d.FECShortShards = atomic.LoadUint64(&s.FECShortShards)
+
+	d.BytesSentFromNoMeteredRaw = atomic.LoadUint64(&s.BytesSentFromNoMeteredRaw)
+	d.BytesSentFromMeteredRaw = atomic.LoadUint64(&s.BytesSentFromMeteredRaw)
+	d.BytesReceivedFromNoMeteredRaw = atomic.LoadUint64(&s.BytesReceivedFromNoMeteredRaw)
+	d.BytesReceivedFromMeteredRaw = atomic.LoadUint64(&s.BytesReceivedFromMeteredRaw)
+	d.SegmentNumbersACKed = atomic.LoadUint64(&s.SegmentNumbersACKed)
+	d.SegmentNumbersPromotedACKed = atomic.LoadUint64(&s.SegmentNumbersPromotedACKed)
 	return d
 }
 
@@ -191,6 +226,13 @@ func (s *Snmp) Reset() {
 	atomic.StoreUint64(&s.FECErrs, 0)
 	atomic.StoreUint64(&s.FECRecovered, 0)
 	atomic.StoreUint64(&s.FECShortShards, 0)
+
+	atomic.StoreUint64(&s.BytesSentFromNoMeteredRaw, 0)
+	atomic.StoreUint64(&s.BytesSentFromMeteredRaw, 0)
+	atomic.StoreUint64(&s.BytesReceivedFromNoMeteredRaw, 0)
+	atomic.StoreUint64(&s.BytesReceivedFromMeteredRaw, 0)
+	atomic.StoreUint64(&s.SegmentNumbersACKed, 0)
+	atomic.StoreUint64(&s.SegmentNumbersPromotedACKed, 0)
 }
 
 // DefaultSnmp is the global KCP connection statistics collector

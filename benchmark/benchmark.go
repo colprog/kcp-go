@@ -14,15 +14,18 @@ import (
 
 type (
 	BenchCliOps struct {
-		min_buffer_size        int    `json:"min_buffer_size"`
-		max_buffer_size        int    `json:"max_buffer_size"`
-		remote_address         string `json:"remote_address"`
-		data_random_mode       int    `json:"data_random_mode"`
-		remote_slow_port       int    `json:"remote_slow_port"`
-		remote_metered_address string `json:"remote_metered_address"`
+		min_buffer_size        int     `json:"min_buffer_size"`
+		max_buffer_size        int     `json:"max_buffer_size"`
+		remote_address         string  `json:"remote_address"`
+		data_random_mode       int     `json:"data_random_mode"`
+		remote_slow_port       int     `json:"remote_slow_port"`
+		remote_metered_address string  `json:"remote_metered_address"`
+		statistical_interval   int     `json:"statistical_interval"`
+		monitor_interval       int     `json:"monitor_interval"`
+		detect_rate            float64 `json:"detect_rate"`
 	}
 
-	BnechServerOps struct {
+	BenchSerOps struct {
 		listen_slow_port     int     `json:"listen_slow_port"`
 		drop_rate            float64 `json:"drop_rate"`
 		max_buffer_size      int     `json:"max_buffer_size"`
@@ -32,7 +35,7 @@ type (
 
 	BenchOps struct {
 		metered_address string
-		serverOps       BnechServerOps
+		serverOps       BenchSerOps
 		cliOps          BenchCliOps
 	}
 )
@@ -51,7 +54,7 @@ func main() {
 
 	benchOps := new(BenchOps)
 	benchCliOps := new(BenchCliOps)
-	benchSerOps := new(BnechServerOps)
+	benchSerOps := new(BenchSerOps)
 
 	app := &cli.App{
 		Name:  "KCP-GO benchmark",
@@ -98,7 +101,7 @@ func main() {
 					},
 					&cli.IntFlag{
 						Name:  "statistical_interval",
-						Usage: "Meter ip address.",
+						Usage: "The interval to print statistical",
 						Value: 30,
 					},
 				},
@@ -175,6 +178,27 @@ func main() {
 						Usage: "Remote slow port address.",
 						Value: 10086,
 					},
+					&cli.IntFlag{
+						Name:  "statistical_interval",
+						Usage: "The interval to print statistical",
+						Value: 30,
+					},
+					&cli.IntFlag{
+						Name:  "monitor_interval",
+						Usage: "Enable the monitor in client side and set the interval. 0 means not enable monitor.",
+						Value: 0,
+						Action: func(ctx *cli.Context, v int) error {
+							if v < 0 || v > 60 {
+								return fmt.Errorf("flag monitor_interval value %d out of range[0, 60]", v)
+							}
+							return nil
+						},
+					},
+					&cli.Float64Flag{
+						Name:  "detect_rate",
+						Usage: "After enabled monitor, the rate will effect mode change",
+						Value: 0.9,
+					},
 				},
 				Action: func(c *cli.Context) error {
 					runMode = ClientMode
@@ -184,6 +208,9 @@ func main() {
 					benchCliOps.data_random_mode = c.Int("data_random_mode")
 					benchCliOps.remote_slow_port = c.Int("remote_slow_port")
 					benchCliOps.remote_metered_address = c.String("remote_metered_address")
+					benchCliOps.statistical_interval = c.Int("statistical_interval")
+					benchCliOps.monitor_interval = c.Int("monitor_interval")
+					benchCliOps.detect_rate = c.Float64("detect_rate")
 					if len(benchCliOps.remote_metered_address) == 0 {
 						return errors.New("invalid remote_metered_address")
 					}
@@ -282,7 +309,7 @@ func getRandomData(randMode int, minSize int, maxSize int) ([]byte, int, error) 
 	return staticByteData[:dataLen], dataLen, nil
 }
 
-func startServerSnmpTricker(args *BnechServerOps) *time.Ticker {
+func startServerSnmpTricker(args *BenchSerOps) *time.Ticker {
 	snmpTicker := time.NewTicker(time.Duration(args.statistical_interval) * time.Second)
 
 	go func(t *time.Ticker) {
@@ -295,7 +322,20 @@ func startServerSnmpTricker(args *BnechServerOps) *time.Ticker {
 	return snmpTicker
 }
 
-func startServer(args *BnechServerOps) error {
+func startClientSnmpTricker(args *BenchCliOps) *time.Ticker {
+	snmpTicker := time.NewTicker(time.Duration(args.statistical_interval) * time.Second)
+
+	go func(t *time.Ticker) {
+		for {
+			<-t.C
+			log.Println(kcp.DefaultSnmp.ToString())
+		}
+	}(snmpTicker)
+
+	return snmpTicker
+}
+
+func startServer(args *BenchSerOps) error {
 
 	log.Printf("Benchmark server side started. options: %+v \n", args)
 	listenSlowAddrStr := fmt.Sprintf("%s:%d", "0.0.0.0", args.listen_slow_port)
@@ -337,10 +377,20 @@ func handleMessage(conn *kcp.UDPSession, maxSize int) {
 func start(args *BenchCliOps) error {
 	log.Printf("Benchmark client side started. options: %+v \n", args)
 
+	snmpTicker := startClientSnmpTricker(args)
+	defer snmpTicker.Stop()
+
 	remoteSlowAddrStr := fmt.Sprintf("%s:%d", args.remote_address, args.remote_slow_port)
 	log.Println("Connect to:", remoteSlowAddrStr)
 	if sess, err := kcp.Dial(remoteSlowAddrStr); err == nil {
 		sess.SetMeteredAddr(args.remote_metered_address, uint16(args.remote_slow_port), true)
+
+		if args.monitor_interval != 0 {
+			err := sess.EnableMonitor(uint64(args.monitor_interval), args.detect_rate)
+			if err != nil {
+				return err
+			}
+		}
 
 		for {
 			data, dataLen, err := getRandomData(args.data_random_mode, args.min_buffer_size, args.max_buffer_size)
