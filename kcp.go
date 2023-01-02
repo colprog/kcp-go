@@ -115,6 +115,9 @@ type segment struct {
 	fastack  uint32
 	acked    uint32 // mark if the seg has acked
 	data     []byte
+
+	// No need encoded.
+	has_promote bool
 }
 
 // encode a segment into buffer
@@ -214,11 +217,16 @@ func NewKCPWithDrop(conv uint32, output output_callback, dropRate float64, dropO
 // newSegment creates a KCP segment
 func (kcp *KCP) newSegment(size int) (seg segment) {
 	seg.data = xmitBuf.Get().([]byte)[:size]
+	seg.has_promote = false
 	return
 }
 
 // delSegment recycles a KCP segment
 func (kcp *KCP) delSegment(seg *segment) {
+	atomic.AddUint64(&DefaultSnmp.SegmentNumbersACKed, 1)
+	if seg.has_promote || globalSessionType == SessionTypeOnlyMetered {
+		atomic.AddUint64(&DefaultSnmp.SegmentNumbersPromotedACKed, 1)
+	}
 	if seg.data != nil {
 		xmitBuf.Put(seg.data)
 		seg.data = nil
@@ -437,6 +445,7 @@ func (kcp *KCP) parse_ack(sn uint32) {
 
 	for k := range kcp.snd_buf {
 		seg := &kcp.snd_buf[k]
+
 		if sn == seg.sn {
 			// mark and free space, but leave the segment here,
 			// and wait until `una` to delete this, then we don't
@@ -653,6 +662,11 @@ func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool) int {
 
 		inSegs++
 		data = data[length:]
+		if fromMetered {
+			atomic.AddUint64(&DefaultSnmp.BytesReceivedFromMeteredRaw, uint64(length))
+		} else {
+			atomic.AddUint64(&DefaultSnmp.BytesReceivedFromNoMeteredRaw, uint64(length))
+		}
 	}
 	atomic.AddUint64(&DefaultSnmp.InSegs, inSegs)
 
@@ -798,6 +812,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	if (kcp.probe & IKCP_ASK_SEND) != 0 {
 		seg.cmd = IKCP_CMD_WASK
 		promoteToImportant = true
+		seg.has_promote = true
 		makeSpace(IKCP_OVERHEAD, promoteToImportant)
 		ptr = seg.encode(ptr)
 	}
@@ -806,6 +821,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	if (kcp.probe & IKCP_ASK_TELL) != 0 {
 		seg.cmd = IKCP_CMD_WINS
 		promoteToImportant = true
+		seg.has_promote = true
 		makeSpace(IKCP_OVERHEAD, promoteToImportant)
 		ptr = seg.encode(ptr)
 	}
@@ -907,6 +923,9 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			segment.una = seg.una
 
 			willPromote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
+			if willPromote || promoteToImportant {
+				segment.has_promote = true
+			}
 			flushACK(willPromote || promoteToImportant)
 
 			need := IKCP_OVERHEAD + len(segment.data)

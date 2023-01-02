@@ -52,6 +52,18 @@ var (
 	xmitBuf sync.Pool
 )
 
+type SessionType int32
+
+const (
+	SessionTypeNormal       SessionType = 0
+	SessionTypeExistMetered SessionType = 1
+	SessionTypeOnlyMetered  SessionType = 2
+)
+
+var (
+	globalSessionType SessionType = SessionTypeNormal
+)
+
 func init() {
 	xmitBuf.New = func() interface{} {
 		return make([]byte, mtuLimit)
@@ -112,6 +124,15 @@ type (
 		meteredRemote  *net.UDPAddr
 
 		mu sync.Mutex
+	}
+
+	// TODO
+	UDPSessionMonitor struct {
+		lastSegmentAcked         uint64
+		lastSegmentPromotedAcked uint64
+
+		conn net.PacketConn
+		kcp  *KCP
 	}
 
 	setReadBuffer interface {
@@ -594,14 +615,22 @@ func (s *UDPSession) output(buf []byte, important bool) {
 	// 4. TxQueue
 	var msg ipv4.Message
 	for i := 0; i < s.dup+1; i++ {
-		bts := xmitBuf.Get().([]byte)[:len(buf)]
+		length := len(buf)
+		bts := xmitBuf.Get().([]byte)[:length]
 		copy(bts, buf)
+
+		if globalSessionType == SessionTypeOnlyMetered {
+			shouldAddToMeteredQ = true
+		}
+
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
 		s.txqueue = append(s.txqueue, msg)
+		atomic.AddUint64(&DefaultSnmp.BytesSentFromNoMeteredRaw, uint64(length))
 		if shouldAddToMeteredQ {
 			msg.Addr = s.meteredRemote
 			s.meteredTxqueue = append(s.meteredTxqueue, msg)
+			atomic.AddUint64(&DefaultSnmp.BytesSentFromMeteredRaw, uint64(length))
 		}
 	}
 
@@ -875,8 +904,6 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 			}
 		}
 		l.sessionLock.RUnlock()
-
-		// TBD : isFromMeteredIP will not work in loopback
 
 		var conv, sn uint32
 		convRecovered := false
@@ -1155,6 +1182,58 @@ func (s *UDPSession) SetMeteredAddr(raddr string, port uint16, force bool) error
 
 func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
 	return s.meteredRemote
+}
+
+func MonitorStart(interval uint64, detectRate float64) {
+	sessMonitor := new(UDPSessionMonitor)
+
+	for {
+		// Monitor have been disabled
+		if globalSessionType == SessionTypeNormal {
+			break
+		}
+
+		cSegmentACKed := atomic.LoadUint64(&DefaultSnmp.SegmentNumbersACKed)
+		cSegmentPromotedACKed := atomic.LoadUint64(&DefaultSnmp.SegmentNumbersPromotedACKed)
+
+		if sessMonitor.lastSegmentAcked > cSegmentACKed || sessMonitor.lastSegmentPromotedAcked > cSegmentPromotedACKed {
+			// skipped
+			sessMonitor.lastSegmentAcked = cSegmentACKed
+			sessMonitor.lastSegmentPromotedAcked = cSegmentPromotedACKed
+			continue
+		}
+
+		dSegmentACKed := cSegmentACKed - sessMonitor.lastSegmentAcked
+		dSegmentPromotedACKed := cSegmentPromotedACKed - sessMonitor.lastSegmentPromotedAcked
+
+		if dSegmentACKed != 0 && (float64(dSegmentPromotedACKed)/float64(dSegmentACKed) > detectRate) {
+			// change to only meter route
+			globalSessionType = SessionTypeOnlyMetered
+			// TODO: add check routine
+		}
+
+		sessMonitor.lastSegmentAcked = cSegmentACKed
+		sessMonitor.lastSegmentPromotedAcked = cSegmentPromotedACKed
+
+		// TODO: If need support diable monitor, then change the sleep to timeout latch
+		time.Sleep(time.Duration(interval) * time.Second)
+	}
+}
+
+func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err error) {
+
+	if s.meteredRemote == nil {
+		return errors.New("can not enable monitor, If there no metered remote set")
+	}
+
+	if globalSessionType != SessionTypeNormal {
+		return errors.New("already enabled monitor")
+	}
+
+	globalSessionType = SessionTypeExistMetered
+	go MonitorStart(interval, detectRate)
+
+	return nil
 }
 
 // Dial connects to the remote address "raddr" on the network "udp" without encryption and FEC
