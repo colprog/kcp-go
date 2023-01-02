@@ -111,6 +111,9 @@ type (
 		socketReadErrorOnce  sync.Once
 		socketWriteErrorOnce sync.Once
 
+		// grpc controller server
+		controller *ControllerServer
+
 		// nonce generator
 		nonce Entropy
 
@@ -1184,7 +1187,7 @@ func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
 	return s.meteredRemote
 }
 
-func MonitorStart(interval uint64, detectRate float64) {
+func MonitorStart(interval uint64, detectRate float64, controller *ControllerServer) {
 	sessMonitor := new(UDPSessionMonitor)
 
 	for {
@@ -1210,6 +1213,16 @@ func MonitorStart(interval uint64, detectRate float64) {
 			// change to only meter route
 			globalSessionType = SessionTypeOnlyMetered
 			// TODO: add check routine
+			if controller != nil {
+
+				if controller.newRegistered {
+					// TODO: change to backup line
+					controller.resetRegisterServer()
+				} else {
+					fmt.Printf("[warning] Controller Server stared, but have not config the backup server.")
+				}
+
+			}
 		}
 
 		sessMonitor.lastSegmentAcked = cSegmentACKed
@@ -1231,7 +1244,7 @@ func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err err
 	}
 
 	globalSessionType = SessionTypeExistMetered
-	go MonitorStart(interval, detectRate)
+	go MonitorStart(interval, detectRate, s.controller)
 
 	return nil
 }

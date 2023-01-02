@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+option go_package = "github.com/xtaci/kcp-go/v5/grpc_control";
+
+package kcp_ctl;
+
+service KCPSessionCtl {
+  rpc GetSessions (GetSessionsRequest) returns (GetSessionsReply);
+  rpc RegsiterNewSession (RegsiterNewSessionRequest) returns (RegsiterNewSessionReply);
+}
+
+message GetSessionsRequest {
+}
+
+message GetSessionsReply {
+  repeated ConnectionInfo connections = 1;
+}
+
+enum SessionStatus {
+  SessionTypeNormal = 0;
+	SessionTypeExistMetered = 1;
+	SessionTypeOnlyMetered = 2;
+}
+
+message ConnectionInfo {
+  SessionStatus status = 1;
+  uint64 sent_bytes = 2;
+  uint64 recv_bytes = 3;
+  uint64 dropt_bytes = 4;
+  uint64 max_conn = 5;
+  uint64 active_opens = 6;
+  uint64 passive_opens = 7;
+  uint64 curr_estab = 8;
+  uint64 in_errs = 9;
+  uint64 in_csum_errs = 10;
+  uint64 kcp_in_errs = 11;
+  uint64 in_pkts = 12;
+  uint64 out_pkts = 13;
+  uint64 in_segs = 14;
+  uint64 out_segs = 15;
+  uint64 in_bytes = 16;
+  uint64 out_bytes = 17;
+  uint64 retrans_segs = 18;
+  uint64 fast_retrans_segs = 19;
+  uint64 early_retrans_segs = 20;
+  uint64 lost_segs = 21;
+  uint64 repeat_segs = 22;
+  uint64 fec_recovered = 23;
+  uint64 fec_errs = 24;
+  uint64 fec_parity_shards = 25;
+  uint64 fec_short_shards = 26;
+  uint64 bytes_sent_from_no_metered = 27;
+  uint64 bytes_sent_from_metered = 28;
+  uint64 bytes_recv_from_no_metered = 29;
+  uint64 bytes_recv_from_metered = 30;
+  uint64 segs_acked = 31;
+  uint64 segs_promote_acked = 32;
+}
+
+message RegsiterNewSessionRequest {
+  string ip_address = 1;
+  int32 port = 2;
+  string alternative_ip = 3;
+  int32 alternative_port = 4;
+}
+
+message RegsiterNewSessionReply {
+}
