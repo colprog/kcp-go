@@ -152,7 +152,7 @@ func (l *Listener) NewControllerConfig(controllerConfig *ControllerServerConfig)
 	if len(l.sessions) != 0 || len(l.sessionAlias) != 0 {
 		return errors.New("already exist session, should create controller server before session in.")
 	}
-	l.contollerServer = NewSessionControllerServer(controllerConfig)
+	l.contollerServer = NewSessionControllerServer(controllerConfig, true)
 	return nil
 }
 

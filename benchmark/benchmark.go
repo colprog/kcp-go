@@ -387,6 +387,10 @@ func start(args *BenchCliOps) error {
 	if sess, err := kcp.Dial(remoteSlowAddrStr); err == nil {
 		sess.SetMeteredAddr(args.remote_metered_address, uint16(args.remote_slow_port), true)
 
+		cliConfig := kcp.NewDefaultConfig()
+		cliConfig.SetControllerPort(10721)
+		sess.SetControllerServer(kcp.NewSessionControllerServer(cliConfig, false))
+
 		if args.monitor_interval != 0 {
 			err := sess.EnableMonitor(uint64(args.monitor_interval), args.detect_rate)
 			if err != nil {
