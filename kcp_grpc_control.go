@@ -2,6 +2,7 @@ package kcp
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"sync/atomic"
@@ -10,12 +11,28 @@ import (
 	"google.golang.org/grpc"
 )
 
+type ControllerServerConfig struct {
+	enableOriginRouteDetect bool
+	controllerIP            string
+	controllerPort          int
+}
+
+func (config *ControllerServerConfig) NewDefaultConfig() *ControllerServerConfig {
+	c := new(ControllerServerConfig)
+	c.controllerIP = "0.0.0.0"
+	c.controllerPort = 10720
+	c.enableOriginRouteDetect = true
+	return c
+}
+
 type ControllerServer struct {
 	pb.UnimplementedKCPSessionCtlServer
 
 	newRegistered bool
 	registerIP    string
 	registerPort  int
+
+	config *ControllerServerConfig
 }
 
 func (server *ControllerServer) GetSessions(context.Context, *pb.GetSessionsRequest) (*pb.GetSessionsReply, error) {
@@ -27,7 +44,7 @@ func (server *ControllerServer) GetSessions(context.Context, *pb.GetSessionsRequ
 
 	s := DefaultSnmp.Copy()
 	reply.Connections = make([]*pb.ConnectionInfo, 1)
-	d := reply.Connections[0]
+	d := new(pb.ConnectionInfo)
 
 	d.SentBytes = atomic.LoadUint64(&s.BytesSent)
 	d.RecvBytes = atomic.LoadUint64(&s.BytesReceived)
@@ -62,6 +79,10 @@ func (server *ControllerServer) GetSessions(context.Context, *pb.GetSessionsRequ
 	d.SegsAcked = atomic.LoadUint64(&s.SegmentNumbersACKed)
 	d.SegsPromoteAcked = atomic.LoadUint64(&s.SegmentNumbersPromotedACKed)
 
+	d.Status = pb.SessionStatus(globalSessionType)
+
+	reply.Connections[0] = d
+
 	return &reply, nil
 }
 
@@ -74,15 +95,20 @@ func (server *ControllerServer) RegsiterNewSession(_ context.Context, request *p
 	return &reply, nil
 }
 
-func NewSessionControllerServer() *ControllerServer {
+func NewSessionControllerServer(config *ControllerServerConfig) *ControllerServer {
 	s := &ControllerServer{}
 
-	li, err := net.Listen("tcp", "0.0.0.0:10720")
+	if config == nil {
+		config = config.NewDefaultConfig()
+	}
+
+	rpcAddr := fmt.Sprintf("%s:%d", config.controllerIP, config.controllerPort)
+	li, err := net.Listen("tcp", rpcAddr)
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
-
-	log.Printf("Controller listening on 0.0.0.0:10720")
+	fmt.Printf("Controller listening on %s\n", rpcAddr)
+	log.Printf("Controller listening on %s\n", rpcAddr)
 	go func() {
 		grpcServer := grpc.NewServer()
 		pb.RegisterKCPSessionCtlServer(grpcServer, s)

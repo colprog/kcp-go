@@ -25,7 +25,7 @@ func TestPb(t *testing.T) {
 
 // Need server started
 func TestGetSessions(t *testing.T) {
-	conn, err := grpc.Dial(":2000", grpc.WithInsecure())
+	conn, err := grpc.Dial(":10720", grpc.WithInsecure())
 	assert.NoError(t, err)
 	defer conn.Close()
 
