@@ -111,6 +111,9 @@ type (
 		socketReadErrorOnce  sync.Once
 		socketWriteErrorOnce sync.Once
 
+		// grpc controller server
+		controller *ControllerServer
+
 		// nonce generator
 		nonce Entropy
 
@@ -236,6 +239,10 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	}
 
 	return sess
+}
+
+func (sess *UDPSession) SetControllerServer(controller *ControllerServer) {
+	sess.controller = controller
 }
 
 // Read implements net.Conn
@@ -857,6 +864,8 @@ type (
 
 		dropKcpAckRate float64
 		dropOn         bool
+
+		contollerServer *ControllerServer
 	}
 )
 
@@ -934,6 +943,10 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 		if s == nil && convRecovered { // new session
 			if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
 				s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, false, addr, l.block)
+
+				if l.contollerServer != nil {
+					s.SetControllerServer(l.contollerServer)
+				}
 				s.kcpInput(data, isFromMeteredIP)
 				l.sessionLock.Lock()
 				l.sessions[addr.String()] = s
@@ -956,6 +969,14 @@ func (l *Listener) notifyReadError(err error) {
 		}
 		l.sessionLock.RUnlock()
 	})
+}
+
+func (l *Listener) NewControllerConfig(controllerConfig *ControllerServerConfig) (err error) {
+	if len(l.sessions) != 0 || len(l.sessionAlias) != 0 {
+		return errors.New("already exist session, should create controller server before session in.")
+	}
+	l.contollerServer = NewSessionControllerServer(controllerConfig)
+	return nil
 }
 
 // SetReadBuffer sets the socket read buffer for the Listener
@@ -1184,7 +1205,7 @@ func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
 	return s.meteredRemote
 }
 
-func MonitorStart(interval uint64, detectRate float64) {
+func MonitorStart(interval uint64, detectRate float64, controller *ControllerServer) {
 	sessMonitor := new(UDPSessionMonitor)
 
 	for {
@@ -1210,6 +1231,16 @@ func MonitorStart(interval uint64, detectRate float64) {
 			// change to only meter route
 			globalSessionType = SessionTypeOnlyMetered
 			// TODO: add check routine
+			if controller != nil {
+
+				if controller.newRegistered {
+					// TODO: change to backup line
+					controller.resetRegisterServer()
+				} else {
+					fmt.Printf("[warning] Controller Server stared, but have not config the backup server.")
+				}
+
+			}
 		}
 
 		sessMonitor.lastSegmentAcked = cSegmentACKed
@@ -1231,7 +1262,7 @@ func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err err
 	}
 
 	globalSessionType = SessionTypeExistMetered
-	go MonitorStart(interval, detectRate)
+	go MonitorStart(interval, detectRate, s.controller)
 
 	return nil
 }

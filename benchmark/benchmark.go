@@ -346,6 +346,8 @@ func startServer(args *BenchSerOps) error {
 		return err
 	}
 
+	slowListener.NewControllerConfig(nil)
+
 	snmpTicker := startServerSnmpTricker(args)
 	defer snmpTicker.Stop()
 
