@@ -31,6 +31,9 @@ const (
 	IKCP_PROBE_LIMIT   = 120000 // up to 120 secs to probe window
 	IKCP_SN_OFFSET     = 12
 	IKCP_FASTACK_LIMIT = 8
+
+	IKCP_ALIVE_DETECTION   = 17
+	IKCP_ALIVE_DETECT_HEAD = 4
 )
 
 // monotonic reference time point
@@ -562,8 +565,9 @@ func (kcp *KCP) parse_data(newseg segment) bool {
 // codecs.
 //
 // 'ackNoDelay' will trigger immediate ACK, but surely it will not be efficient in bandwidth
-func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool) int {
+func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool, controller *ControllerServer) int {
 	snd_una := kcp.snd_una
+
 	if len(data) < IKCP_OVERHEAD {
 		return -1
 	}

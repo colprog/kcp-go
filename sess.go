@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -52,17 +53,25 @@ var (
 	xmitBuf sync.Pool
 )
 
-type SessionType int32
-
 const (
-	SessionTypeNormal       SessionType = 0
-	SessionTypeExistMetered SessionType = 1
-	SessionTypeOnlyMetered  SessionType = 2
+	SessionTypeNormal       int32 = 0
+	SessionTypeExistMetered int32 = 1
+	SessionTypeOnlyMetered  int32 = 2
 )
 
 var (
-	globalSessionType SessionType = SessionTypeNormal
+	globalSessionType int32 = SessionTypeNormal
 )
+
+func RunningAsExistMetered() {
+	atomic.StoreInt32(&globalSessionType, SessionTypeExistMetered)
+	log.Printf("current session running as SessionTypeExistMetered")
+}
+
+func RunningAsOnlyMetered() {
+	atomic.StoreInt32(&globalSessionType, SessionTypeOnlyMetered)
+	log.Printf("current session running as SessionTypeOnlyMetered")
+}
 
 func init() {
 	xmitBuf.New = func() interface{} {
@@ -129,13 +138,9 @@ type (
 		mu sync.Mutex
 	}
 
-	// TODO
 	UDPSessionMonitor struct {
 		lastSegmentAcked         uint64
 		lastSegmentPromotedAcked uint64
-
-		conn net.PacketConn
-		kcp  *KCP
 	}
 
 	setReadBuffer interface {
@@ -765,7 +770,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 			}
 			recovers := s.fecDecoder.decode(f)
 			if f.flag() == typeData {
-				if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, isFromMeteredIP, s.ackNoDelay); ret != 0 {
+				if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, isFromMeteredIP, s.ackNoDelay, s.controller); ret != 0 {
 					kcpInErrors++
 				}
 			}
@@ -774,7 +779,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 				if len(r) >= 2 { // must be larger than 2bytes
 					sz := binary.LittleEndian.Uint16(r)
 					if int(sz) <= len(r) && sz >= 2 {
-						if ret := s.kcp.Input(r[2:sz], false, isFromMeteredIP, s.ackNoDelay); ret == 0 {
+						if ret := s.kcp.Input(r[2:sz], false, isFromMeteredIP, s.ackNoDelay, s.controller); ret == 0 {
 							fecRecovered++
 						} else {
 							kcpInErrors++
@@ -806,7 +811,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 		}
 	} else {
 		s.mu.Lock()
-		if ret := s.kcp.Input(data, true, isFromMeteredIP, s.ackNoDelay); ret != 0 {
+		if ret := s.kcp.Input(data, true, isFromMeteredIP, s.ackNoDelay, s.controller); ret != 0 {
 			kcpInErrors++
 		}
 		if n := s.kcp.PeekSize(); n > 0 {
@@ -878,52 +883,6 @@ func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
 	return s.meteredRemote
 }
 
-func MonitorStart(interval uint64, detectRate float64, controller *ControllerServer) {
-	sessMonitor := new(UDPSessionMonitor)
-
-	for {
-		// Monitor have been disabled
-		if globalSessionType == SessionTypeNormal {
-			break
-		}
-
-		cSegmentACKed := atomic.LoadUint64(&DefaultSnmp.SegmentNumbersACKed)
-		cSegmentPromotedACKed := atomic.LoadUint64(&DefaultSnmp.SegmentNumbersPromotedACKed)
-
-		if sessMonitor.lastSegmentAcked > cSegmentACKed || sessMonitor.lastSegmentPromotedAcked > cSegmentPromotedACKed {
-			// skipped
-			sessMonitor.lastSegmentAcked = cSegmentACKed
-			sessMonitor.lastSegmentPromotedAcked = cSegmentPromotedACKed
-			continue
-		}
-
-		dSegmentACKed := cSegmentACKed - sessMonitor.lastSegmentAcked
-		dSegmentPromotedACKed := cSegmentPromotedACKed - sessMonitor.lastSegmentPromotedAcked
-
-		if dSegmentACKed != 0 && (float64(dSegmentPromotedACKed)/float64(dSegmentACKed) > detectRate) {
-			// change to only meter route
-			globalSessionType = SessionTypeOnlyMetered
-			// TODO: add check routine
-			if controller != nil {
-
-				if controller.newRegistered {
-					// TODO: change to backup line
-					controller.resetRegisterServer()
-				} else {
-					fmt.Printf("[warning] Controller Server stared, but have not config the backup server.")
-				}
-
-			}
-		}
-
-		sessMonitor.lastSegmentAcked = cSegmentACKed
-		sessMonitor.lastSegmentPromotedAcked = cSegmentPromotedACKed
-
-		// TODO: If need support diable monitor, then change the sleep to timeout latch
-		time.Sleep(time.Duration(interval) * time.Second)
-	}
-}
-
 func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err error) {
 
 	if s.meteredRemote == nil {
@@ -934,8 +893,9 @@ func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err err
 		return errors.New("already enabled monitor")
 	}
 
-	globalSessionType = SessionTypeExistMetered
-	go MonitorStart(interval, detectRate, s.controller)
+	RunningAsExistMetered()
+	log.Printf("enabled monitor, monitor stared. interval=%d,detectRate=%f \n", interval, detectRate)
+	go MonitorStart(s, interval, detectRate, s.controller)
 
 	return nil
 }
