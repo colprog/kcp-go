@@ -290,10 +290,12 @@ func (l *Listener) closeSession(remote net.Addr, alternativeIP *net.UDPAddr) (re
 func (l *Listener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 // Listen listens for incoming KCP packets addressed to the local address laddr on the network "udp",
-func Listen(laddr string) (*Listener, error) { return ListenWithOptions(laddr, nil, 0, 0) }
+func Listen(laddr string) (*Listener, error) {
+	return ListenWithOptions(laddr, nil, 0, 0, nil, InfoLevelLog)
+}
 
 func ListenWithDrop(laddr string, dropRate float64) (*Listener, error) {
-	l, err := ListenWithOptions(laddr, nil, 0, 0)
+	l, err := ListenWithOptions(laddr, nil, 0, 0, nil, DebugLevelLog)
 	l.dropKcpAckRate = dropRate
 	l.dropOpen()
 	return l, err
@@ -306,7 +308,12 @@ func ListenWithDrop(laddr string, dropRate float64) (*Listener, error) {
 // 'dataShards', 'parityShards' specify how many parity packets will be generated following the data packets.
 //
 // Check https://github.com/klauspost/reedsolomon for details
-func ListenWithOptions(laddr string, block BlockCrypt, dataShards, parityShards int) (*Listener, error) {
+func ListenWithOptions(laddr string, block BlockCrypt, dataShards, parityShards int, outputFile *string, logLevel int) (*Listener, error) {
+	err := LoggerInit(outputFile, logLevel)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
 	udpaddr, err := net.ResolveUDPAddr("udp", laddr)
 	if err != nil {
 		return nil, errors.WithStack(err)

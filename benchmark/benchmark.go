@@ -50,6 +50,12 @@ const (
 )
 
 func main() {
+
+	err := kcp.LoggerDefault()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	runMode := InvalidMode
 
 	benchOps := new(BenchOps)
@@ -247,24 +253,24 @@ func main() {
 	}
 
 	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
+		kcp.LogTestFatalf("Fail to start application, error: %s", err)
 	}
 
 	switch runMode {
 	case ServerMode:
 		err := startServer(benchSerOps)
 		if err != nil {
-			log.Println("server side got error:", err)
+			kcp.LogTestFatalf("server side got error: %s", err)
 		}
 		return
 	case ClientMode:
 		err := start(benchCliOps)
 		if err != nil {
-			log.Fatal(err)
+			kcp.LogTestFatalf("client side got error: %s", err)
 		}
 	case DirectRun:
-		// TBD
-		log.Fatal("No support yet!")
+		// TODO
+		kcp.LogTestFatalf("No support yet!")
 	default:
 		return
 	}
@@ -315,7 +321,7 @@ func startServerSnmpTricker(args *BenchSerOps) *time.Ticker {
 	go func(t *time.Ticker) {
 		for {
 			<-t.C
-			log.Println(kcp.DefaultSnmp.ToString())
+			kcp.LogTest(kcp.DefaultSnmp.ToString())
 		}
 	}(snmpTicker)
 
@@ -328,7 +334,7 @@ func startClientSnmpTricker(args *BenchCliOps) *time.Ticker {
 	go func(t *time.Ticker) {
 		for {
 			<-t.C
-			log.Println(kcp.DefaultSnmp.ToString())
+			kcp.LogTest(kcp.DefaultSnmp.ToString())
 		}
 	}(snmpTicker)
 
@@ -337,10 +343,10 @@ func startClientSnmpTricker(args *BenchCliOps) *time.Ticker {
 
 func startServer(args *BenchSerOps) error {
 
-	log.Printf("Benchmark server side started. options: %+v \n", args)
+	kcp.LogTest("Benchmark server side started. options: %+v \n", args)
 	listenSlowAddrStr := fmt.Sprintf("%s:%d", "0.0.0.0", args.listen_slow_port)
 
-	log.Println("Server slow path listen to:", listenSlowAddrStr)
+	kcp.LogTest("Server slow path listen to: %s", listenSlowAddrStr)
 	slowListener, err := kcp.ListenWithDrop(listenSlowAddrStr, args.drop_rate)
 	if err != nil {
 		return err
@@ -354,7 +360,7 @@ func startServer(args *BenchSerOps) error {
 	for {
 		s, err := slowListener.AcceptKCP()
 		s.SetMeteredAddr(args.metered_address, uint16(args.listen_slow_port), true)
-		log.Println("Server slow path got session on")
+		kcp.LogTest("Server slow path got session on")
 		if err != nil {
 			return err
 		}
@@ -368,22 +374,22 @@ func handleMessage(conn *kcp.UDPSession, maxSize int) {
 	buf := make([]byte, maxSize)
 	for {
 		n, err := conn.Read(buf)
-		log.Println("Server side revc:", n)
+		kcp.LogTest("Server side revc: %d", n)
 		if err != nil {
-			log.Println(err)
+			kcp.LogTest("Server side fail to revc: %s", err)
 			return
 		}
 	}
 }
 
 func start(args *BenchCliOps) error {
-	log.Printf("Benchmark client side started. options: %+v \n", args)
+	kcp.LogTest("Benchmark client side started. options: %+v \n", args)
 
 	snmpTicker := startClientSnmpTricker(args)
 	defer snmpTicker.Stop()
 
 	remoteSlowAddrStr := fmt.Sprintf("%s:%d", args.remote_address, args.remote_slow_port)
-	log.Println("Connect to:", remoteSlowAddrStr)
+	kcp.LogTest("Connect to: %s", remoteSlowAddrStr)
 	if sess, err := kcp.Dial(remoteSlowAddrStr); err == nil {
 		sess.SetMeteredAddr(args.remote_metered_address, uint16(args.remote_slow_port), true)
 
@@ -405,7 +411,7 @@ func start(args *BenchCliOps) error {
 			}
 
 			if _, err := sess.Write([]byte(data)); err == nil {
-				log.Println("sent:", dataLen)
+				kcp.LogTest("sent: %d", dataLen)
 			} else {
 				return err
 			}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"log"
 	"net"
 	"sync/atomic"
 	"time"
@@ -147,10 +146,10 @@ func NewSessionControllerServer(config *ControllerServerConfig, serverSide bool)
 	rpcAddr := fmt.Sprintf("%s:%d", config.controllerIP, config.controllerPort)
 	li, err := net.Listen("tcp", rpcAddr)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		LogFatalf("failed to listen: %v", err)
 	}
 
-	log.Printf("Controller listening on %s\n", rpcAddr)
+	LogInfo("Controller listening on %s\n", rpcAddr)
 	go func() {
 		grpcServer := grpc.NewServer()
 		pb.RegisterKCPSessionCtlServer(grpcServer, s)
@@ -162,21 +161,19 @@ func NewSessionControllerServer(config *ControllerServerConfig, serverSide bool)
 			detectAddrStr := fmt.Sprintf("%s:%d", config.dectedIP, config.dectedPort)
 			detectAddr, err := net.ResolveUDPAddr("udp", detectAddrStr)
 			if err != nil {
-				log.Fatalf("detect udp service fail to reslove addr: %s", detectAddrStr)
-				return
+				LogFatalf("detect udp service fail to reslove addr: %s", detectAddrStr)
 			}
-			log.Printf("Controller detect port listening on %s\n", detectAddr)
+			LogInfo("Controller detect port listening on %s\n", detectAddr)
 
 			err = DetectPackageService(detectAddr)
 			if err != nil {
-				log.Fatalf("detect udp service got err: %v", err)
-				return
+				LogFatalf("detect udp service got err: %v", err)
 			}
 		}()
 	}
 
 	if !serverSide && config.allowDetect {
-		log.Printf("[WARN] no effect after client side allow detect")
+		LogWarn("no effect after client side allow detect")
 	}
 
 	return s
@@ -226,7 +223,7 @@ func DetectPackageService(detectAddr *net.UDPAddr) error {
 			return err
 		}
 
-		log.Printf("detect ReadFromUDP get %d data\n", n)
+		LogDebug("detect ReadFromUDP get %d data", n)
 
 		DetectPackageProcess(data, n, listener, remoteAddr)
 	}
@@ -252,7 +249,7 @@ func DetectPackageProcess(data []byte, rev_size int, listener *net.UDPConn, remo
 func DetectPackageVerify(data []byte, rev_size int) (verifed bool) {
 	verifed = false
 	if rev_size != IKCP_ALIVE_DETECTION {
-		log.Printf("detect package parse failed. package length not match. rev size: %d, need %d", rev_size, IKCP_ALIVE_DETECTION)
+		LogWarn("detect package parse failed. package length not match. rev size: %d, need %d", rev_size, IKCP_ALIVE_DETECTION)
 		return
 	}
 
@@ -260,7 +257,7 @@ func DetectPackageVerify(data []byte, rev_size int) (verifed bool) {
 
 	data = ikcp_decode32u(data, &magic)
 	if magic != DETECTION_MAGIC {
-		log.Printf("detect package parse failed. magic not match")
+		LogWarn("detect package parse failed. magic not match")
 		return
 	}
 
@@ -269,7 +266,7 @@ func DetectPackageVerify(data []byte, rev_size int) (verifed bool) {
 	verifed = true
 	for j := 1; j < IKCP_ALIVE_DETECTION-IKCP_ALIVE_DETECT_HEAD; j++ {
 		if data[j] != r {
-			log.Printf("detect package parse failed. data not same.")
+			LogWarn("detect package parse failed. data not same.")
 			verifed = false
 			break
 		}
@@ -284,7 +281,7 @@ func DetectOriginRouteProcess(interval uint64, controller *ControllerServer) (ch
 	r := make([]byte, 1)
 
 	for i := uint16(0); i < controller.config.routeDetectTimes; i++ {
-		log.Printf("DetectOriginRoute start loop: %d/%d\n", i, controller.config.routeDetectTimes)
+		LogInfo("DetectOriginRoute start loop: %d/%d\n", i, controller.config.routeDetectTimes)
 		// reset as init
 		controller.dectectresultVeried = 0
 
@@ -293,12 +290,12 @@ func DetectOriginRouteProcess(interval uint64, controller *ControllerServer) (ch
 		detectAddrStr := fmt.Sprintf("%s:%d", controller.config.dectedIP, controller.config.dectedPort)
 		detectAddr, err := net.ResolveUDPAddr("udp", detectAddrStr)
 		if err != nil {
-			log.Printf("dected addr err: %s\n", err)
+			LogError("dected addr err: %s\n", err)
 			return
 		}
 		conn, err := net.DialUDP("udp", srcAddr, detectAddr)
 		if err != nil {
-			log.Printf("dected err: %s\n", err)
+			LogError("dected err: %s\n", err)
 			time.Sleep(time.Duration(interval) * time.Second)
 			continue
 		}
@@ -390,16 +387,16 @@ func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, control
 				} else if controller.newRegistered {
 					err := backUpRouteWakeUp(sess, controller)
 					if err != nil {
-						log.Println(err)
+						LogError("backup route is invalid, error: %s", err)
 					} else {
 						RunningAsExistMetered()
 					}
 					controller.resetRegisterServer()
 				} else if changed {
-					log.Printf("[WARN] Controller Server stared, but not enable the route detece and not config the backup server.\n")
+					LogWarn("Controller Server stared, but not enable the route detece and not config the backup server.")
 				}
 			} else if changed {
-				log.Printf("[WARN] Controller Server not started.\n")
+				LogWarn("controller Server not started.\n")
 			}
 		}
 

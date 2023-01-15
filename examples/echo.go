@@ -11,20 +11,25 @@ import (
 )
 
 func main() {
+	err := kcp.LoggerDefault()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	key := pbkdf2.Key([]byte("demo pass"), []byte("demo salt"), 1024, 32, sha1.New)
 	block, _ := kcp.NewAESBlockCrypt(key)
-	if listener, err := kcp.ListenWithOptions("127.0.0.1:12345", block, 10, 3); err == nil {
+	if listener, err := kcp.ListenWithOptions("127.0.0.1:12345", block, 10, 3, nil, kcp.DebugLevelLog); err == nil {
 		// spin-up the client
 		go client()
 		for {
 			s, err := listener.AcceptKCP()
 			if err != nil {
-				log.Fatal(err)
+				kcp.LogFatalf("AcceptKCP failed, error: %s", err)
 			}
 			go handleEcho(s)
 		}
 	} else {
-		log.Fatal(err)
+		kcp.LogFatalf("ListenWithOptions failed, error: %s", err)
 	}
 }
 
@@ -34,13 +39,13 @@ func handleEcho(conn *kcp.UDPSession) {
 	for {
 		n, err := conn.Read(buf)
 		if err != nil {
-			log.Println(err)
+			kcp.LogTest("Read buff got error: %s", err)
 			return
 		}
 
-		n, err = conn.Write(buf[:n])
+		_, err = conn.Write(buf[:n])
 		if err != nil {
-			log.Println(err)
+			kcp.LogTest("Write buff got error: %s", err)
 			return
 		}
 	}
@@ -54,24 +59,24 @@ func client() {
 	time.Sleep(time.Second)
 
 	// dial to the echo server
-	if sess, err := kcp.DialWithOptions("127.0.0.1:12345", block, 10, 3); err == nil {
+	if sess, err := kcp.DialWithOptions("127.0.0.1:12345", block, 10, 3, nil, kcp.DebugLevelLog); err == nil {
 		for {
 			data := time.Now().String()
 			buf := make([]byte, len(data))
-			log.Println("sent:", data)
+			kcp.LogTest("sent: %s", data)
 			if _, err := sess.Write([]byte(data)); err == nil {
 				// read back the data
 				if _, err := io.ReadFull(sess, buf); err == nil {
-					log.Println("recv:", string(buf))
+					kcp.LogTest("recv: %s", string(buf))
 				} else {
-					log.Fatal(err)
+					kcp.LogFatalf("ReadFull buff got error: %s", err)
 				}
 			} else {
-				log.Fatal(err)
+				kcp.LogFatalf("Write buff got error: %s", err)
 			}
 			time.Sleep(time.Second)
 		}
 	} else {
-		log.Fatal(err)
+		kcp.LogFatalf("DialWithOptions got error: %s", err)
 	}
 }
