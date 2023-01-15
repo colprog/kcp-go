@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -65,12 +64,12 @@ var (
 
 func RunningAsExistMetered() {
 	atomic.StoreInt32(&globalSessionType, SessionTypeExistMetered)
-	log.Printf("current session running as SessionTypeExistMetered")
+	LogInfo("current session running as SessionTypeExistMetered")
 }
 
 func RunningAsOnlyMetered() {
 	atomic.StoreInt32(&globalSessionType, SessionTypeOnlyMetered)
-	log.Printf("current session running as SessionTypeOnlyMetered")
+	LogInfo("current session running as SessionTypeOnlyMetered")
 }
 
 func init() {
@@ -894,17 +893,19 @@ func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err err
 	}
 
 	RunningAsExistMetered()
-	log.Printf("enabled monitor, monitor stared. interval=%d,detectRate=%f \n", interval, detectRate)
+	LogInfo("enabled monitor, monitor stared. interval=%d,detectRate=%f \n", interval, detectRate)
 	go MonitorStart(s, interval, detectRate, s.controller)
 
 	return nil
 }
 
 // Dial connects to the remote address "raddr" on the network "udp" without encryption and FEC
-func Dial(raddr string) (*UDPSession, error) { return DialWithOptions(raddr, nil, 0, 0) }
+func Dial(raddr string) (*UDPSession, error) {
+	return DialWithOptions(raddr, nil, 0, 0, nil, InfoLevelLog)
+}
 
 func DialWithDrop(raddr string, dropRate float64) (*UDPSession, error) {
-	s, err := DialWithOptions(raddr, nil, 0, 0)
+	s, err := DialWithOptions(raddr, nil, 0, 0, nil, DebugLevelLog)
 	s.kcp.setDropRate(dropRate)
 	s.kcp.dropOpen()
 	return s, err
@@ -917,8 +918,17 @@ func DialWithDrop(raddr string, dropRate float64) (*UDPSession, error) {
 // 'dataShards', 'parityShards' specify how many parity packets will be generated following the data packets.
 //
 // Check https://github.com/klauspost/reedsolomon for details
-func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int) (*UDPSession, error) {
+func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int, outputFile *string, logLevel int) (*UDPSession, error) {
+	err := LoggerInit(outputFile, logLevel)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
 	conn, err := listenAt(raddr)
 	if err != nil {
 		return nil, errors.WithStack(err)
