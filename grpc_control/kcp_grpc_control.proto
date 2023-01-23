@@ -60,8 +60,6 @@ message ConnectionInfo {
 message RegsiterNewSessionRequest {
   string ip_address = 1;
   int32 port = 2;
-  string alternative_ip = 3;
-  int32 alternative_port = 4;
 }
 
 message RegsiterNewSessionReply {
