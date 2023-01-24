@@ -364,6 +364,7 @@ func TestServerRoutineNoSwitch(t *testing.T) {
 
 	for i := 0; i < 10; i++ {
 		time.Sleep(time.Second * 10)
+		// won't change session type if routine is fine
 		assert.Equal(t, SessionTypeExistMetered, globalSessionType)
 	}
 

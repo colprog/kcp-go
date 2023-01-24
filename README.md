@@ -198,6 +198,40 @@ PASS
 ok      github.com/xtaci/kcp-go/v5      64.151s
 ```
 
+## Control server and auto failover 
+New added after [commit: Add fail route detect and switch backup route](https://github.com/colprog/kcp-go/commit/8b3bd52d2ed9c10f4cce254817196350b9761b46) and [commit: Test cases for new controller logic](https://github.com/colprog/kcp-go/commit/f46cafaec7f0907b2fdeb368e750099b5211f4df)
+
+Main logic:
+1. server and client side can call `NewControllerConfig` which stared a grpc control service
+  - Used to register a grpc service 
+  - Interface for grpc service
+    - `GetSessions`(both work on server and client): get the snmp infomation from current sessions.
+    - `RegsiterNewSession`(only work on client side): register backup route to connect server.
+2. auto failover(client side)
+  - Client side can call `EnableMonitor` to enable a monitor which will do: 
+    - watch the origin route status 
+    - auto switch to alter route if origin route is unavailable
+    - decting the origin route back or not after origin route is unavailable
+    - replace the origin route by registered route
+  - Client side status machine 
+    - If there no configured alter route, Then `globalSessionType` will be set in `SessionTypeNormal` 
+    - If there configured alter route, Then `globalSessionType` will be set in `SessionTypeExistMetered`
+    - In type `SessionTypeExistMetered` 
+      - Client side will watch the origin route status 
+      - If origin route is available, Then type won't changed
+      - If origin route is unavailable, Then type change to `SessionTypeOnlyMetered`
+    - In type `SessionTypeOnlyMetered` 
+      - Client side will send all package in alter route. 
+      - Decting the origin route
+        - Decting will continue for N rounds for M times, Determine route quality based on single-round inspection results
+        - If origin route back to available, then type change to `SessionTypeExistMetered`
+        - If origin route still failed, then begin to check backup route
+        - **Notice: After the origin route dected failed, Then we won't decting it anymore**
+      - Check backup route
+        - If user call the `RegsiterNewSession`
+          - Client side will switch origin route to backup route. 
+          - Type change to `SessionTypeExistMetered`.
+        - Otherwise, do nothing.
 
 ## Typical Flame Graph
 ![Flame Graph in kcptun](flame.png)
