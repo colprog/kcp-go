@@ -15,6 +15,7 @@ require (
 require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/davecgh/go-spew v1.1.0 // indirect
+	github.com/docker/docker v20.10.23+incompatible // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.14 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

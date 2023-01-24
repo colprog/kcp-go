@@ -227,6 +227,7 @@ func (kcp *KCP) newSegment(size int) (seg segment) {
 // delSegment recycles a KCP segment
 func (kcp *KCP) delSegment(seg *segment) {
 	atomic.AddUint64(&DefaultSnmp.SegmentNumbersACKed, 1)
+
 	if seg.has_promote || globalSessionType == SessionTypeOnlyMetered {
 		atomic.AddUint64(&DefaultSnmp.SegmentNumbersPromotedACKed, 1)
 	}
@@ -816,7 +817,6 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	if (kcp.probe & IKCP_ASK_SEND) != 0 {
 		seg.cmd = IKCP_CMD_WASK
 		promoteToImportant = true
-		seg.has_promote = true
 		makeSpace(IKCP_OVERHEAD, promoteToImportant)
 		ptr = seg.encode(ptr)
 	}
@@ -825,7 +825,6 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	if (kcp.probe & IKCP_ASK_TELL) != 0 {
 		seg.cmd = IKCP_CMD_WINS
 		promoteToImportant = true
-		seg.has_promote = true
 		makeSpace(IKCP_OVERHEAD, promoteToImportant)
 		ptr = seg.encode(ptr)
 	}

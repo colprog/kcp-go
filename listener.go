@@ -46,6 +46,10 @@ type (
 	}
 )
 
+func (listen *Listener) isDropOpen() bool {
+	return listen.dropOn
+}
+
 func (listen *Listener) dropOpen() {
 	listen.dropOn = true
 	for _, session := range listen.sessions {
@@ -296,6 +300,9 @@ func Listen(laddr string) (*Listener, error) {
 
 func ListenWithDrop(laddr string, dropRate float64) (*Listener, error) {
 	l, err := ListenWithOptions(laddr, nil, 0, 0, nil, DebugLevelLog)
+	if l == nil || err != nil {
+		return l, err
+	}
 	l.dropKcpAckRate = dropRate
 	l.dropOpen()
 	return l, err
