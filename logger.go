@@ -43,10 +43,10 @@ var (
 )
 
 const (
-	ErrorLevelLog int = 3
-	WarnLevelLog  int = 2
-	InfoLevelLog  int = 1
-	DebugLevelLog int = 0
+	ErrorLevelLog int = 4
+	WarnLevelLog  int = 3
+	InfoLevelLog  int = 2
+	DebugLevelLog int = 1
 )
 
 func LoggerDefault() error {
@@ -63,8 +63,8 @@ func LoggerInit(outputFile *string, logLevel int) error {
 		}
 	}
 
-	if logLevel > 3 || logLevel < 0 {
-		return errors.New("invalid log level. must in [0,3]")
+	if logLevel > 4 || logLevel < 1 {
+		return errors.New("invalid log level. must in [1,4]")
 	}
 
 	outIo := func(_file *os.File) io.Writer {
@@ -84,13 +84,13 @@ func LoggerInit(outputFile *string, logLevel int) error {
 
 	switch logLevel {
 	// case 0: do nothing
-	case 3:
+	case 4:
 		WarningLogger.Disable()
 		fallthrough
-	case 2:
+	case 3:
 		InfoLogger.Disable()
 		fallthrough
-	case 1:
+	case 2:
 		DebugLogger.Disable()
 	}
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"testing"
 	"time"
 
@@ -12,10 +14,6 @@ import (
 	"github.com/xtaci/kcp-go/v5/grpc_control"
 	"google.golang.org/grpc"
 )
-
-// User should make sure meterIp + meteredPort is a loopback interface
-var meteredIp = "192.168.0.108"
-var meteredPort = 10011
 
 const (
 	localIp   = "0.0.0.0"
@@ -29,13 +27,17 @@ const (
 	controlDetectPort = 10721
 
 	clientRegisteBackupIp   = "127.0.0.1"
-	clientRegisteBackupPort = 10021
+	clientRegisteBackupPort = localPort
 
 	buffSize = 1024
 
 	clientDetectInterval = 10
 	clientDetectRate     = 0.9
 )
+
+// User should make sure meterIp is a loopback interface
+const meteredIp = "192.168.0.108"
+const meteredPort = localPort
 
 const (
 	ServerCloseSignal     = 1
@@ -52,6 +54,8 @@ var (
 	chanClient   = make(chan int)
 	serverSignal int
 	clientSignal int
+
+	chanProcessServer = make(chan os.Signal, 1)
 
 	listener   *Listener
 	cliSession *UDPSession
@@ -71,7 +75,7 @@ func serverProcess() {
 	startServer(nil)
 }
 
-func processServerSignal(l *Listener) {
+func processRoutineServerSignal(l *Listener) {
 	for {
 		serverSignal = <-chanServer
 		fmt.Printf("serverSignal: %d\n", serverSignal)
@@ -82,6 +86,19 @@ func processServerSignal(l *Listener) {
 		case ServerBeginDropSignal:
 			l.dropOpen()
 		case ServerStopDropSignal:
+			l.dropOff()
+		}
+	}
+}
+
+func processServerSignal(l *Listener) {
+	for {
+		serverProcessSignal := <-chanProcessServer
+		fmt.Printf("serverProcessSignal: %d\n", serverProcessSignal)
+		switch serverProcessSignal {
+		case syscall.SIGUSR1:
+			l.dropOpen()
+		case syscall.SIGUSR2:
 			l.dropOff()
 		}
 	}
@@ -118,12 +135,17 @@ func startServer(t *testing.T) {
 		routeDetectTimes:              0,
 		detectPackageNumbersEachTimes: 0,
 	})
-	go processServerSignal(listener)
+	if t != nil {
+		go processRoutineServerSignal(listener)
+	} else {
+		signal.Notify(chanProcessServer, syscall.SIGUSR1, syscall.SIGUSR2)
+		go processServerSignal(listener)
+	}
 
 	for {
 		s, err := listener.AcceptKCP()
 		s.SetMeteredAddr(meteredIp, uint16(meteredPort), true)
-		LogTest("Server slow path got session on")
+		LogTest("Server got session on")
 		if t != nil {
 			assert.NoError(t, err)
 		} else if err != nil {
@@ -297,7 +319,7 @@ func TestServerForkServer(t *testing.T) {
 	assert.NoError(t, err)
 	time.Sleep(time.Second * 10)
 
-	err = cmd.Process.Signal(os.Interrupt)
+	err = cmd.Process.Signal(syscall.SIGTERM)
 	assert.NoError(t, err)
 }
 
@@ -318,10 +340,109 @@ func TestServerForkServerAndRoutineClient(t *testing.T) {
 
 	time.Sleep(time.Second * 10)
 
-	err = cmd.Process.Signal(os.Interrupt)
+	err = cmd.Process.Signal(syscall.SIGTERM)
 	assert.NoError(t, err)
 
 	chanClient <- ClientCloseSignal
 }
 
-// TBD
+func TestServerRoutineNoSwitch(t *testing.T) {
+	cmd := reexec.Command("serverProcess")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Start()
+	assert.NoError(t, err)
+	time.Sleep(time.Second * 5)
+
+	go startClient(t)
+
+	time.Sleep(time.Second * 5)
+	assert.NotEqual(t, nil, cliSession)
+	assert.NotEqual(t, nil, cliSession.conn)
+	assert.Equal(t, SessionTypeExistMetered, globalSessionType)
+
+	for i := 0; i < 10; i++ {
+		time.Sleep(time.Second * 10)
+		assert.Equal(t, SessionTypeExistMetered, globalSessionType)
+	}
+
+	err = cmd.Process.Signal(syscall.SIGTERM)
+	assert.NoError(t, err)
+
+	chanClient <- ClientCloseSignal
+}
+
+func TestServerRoutineAutoSwitch(t *testing.T) {
+	// 1. start server in fork process(without testing context)
+	cmd := reexec.Command("serverProcess")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Start()
+	assert.NoError(t, err)
+	time.Sleep(time.Second * 5)
+
+	// 2. begin to drop all package which not from alter route
+	err = cmd.Process.Signal(syscall.SIGUSR1)
+	assert.NoError(t, err)
+
+	// 3. start client
+	go startClient(t)
+
+	time.Sleep(time.Second * 5)
+	assert.NotEqual(t, nil, cliSession)
+	assert.NotEqual(t, nil, cliSession.conn)
+
+	cliSession.controller.DisAllowDectecting()
+	cliSession.controller.DisAllowSwitchBakcup()
+
+	// 4. monitor do round and check global status
+	time.Sleep(time.Second * 20)
+	assert.Equal(t, SessionTypeOnlyMetered, globalSessionType)
+
+	// 5. allow dectecting
+	cliSession.controller.AllowDectecting()
+	time.Sleep(time.Second * 10)
+	assert.Equal(t, SessionTypeExistMetered, globalSessionType)
+	cliSession.controller.DisAllowDectecting()
+
+	// will roll back to SessionTypeOnlyMetered, because set the route all dropt
+	time.Sleep(time.Second * 10)
+	assert.Equal(t, SessionTypeOnlyMetered, globalSessionType)
+
+	// 6. begin to register a backup route
+	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", controlIp, clientControlPort), grpc.WithInsecure())
+	assert.NoError(t, err)
+	defer conn.Close()
+
+	KCPSessionCtlCli := grpc_control.NewKCPSessionCtlClient(conn)
+	assert.NotEqual(t, nil, KCPSessionCtlCli)
+
+	registNewSessionReply, err := KCPSessionCtlCli.RegsiterNewSession(context.Background(), &grpc_control.RegsiterNewSessionRequest{
+		IpAddress: clientRegisteBackupIp,
+		Port:      clientRegisteBackupPort,
+	})
+
+	assert.NoError(t, err)
+	assert.NotEqual(t, nil, registNewSessionReply)
+	assert.Equal(t, true, cliSession.controller.newRegistered)
+
+	// 7. test backup route work
+	err = cmd.Process.Signal(syscall.SIGUSR2)
+	assert.NoError(t, err)
+
+	cliSession.controller.AllowSwitchBakcup()
+	time.Sleep(time.Second * 12)
+	assert.Equal(t, SessionTypeExistMetered, globalSessionType)
+	assert.Equal(t, false, cliSession.controller.newRegistered)
+
+	time.Sleep(time.Second * 12)
+	assert.Equal(t, SessionTypeExistMetered, globalSessionType)
+
+	// close server and client
+	err = cmd.Process.Signal(syscall.SIGTERM)
+	assert.NoError(t, err)
+
+	chanClient <- ClientCloseSignal
+}

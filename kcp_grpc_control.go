@@ -73,6 +73,10 @@ type ControllerServer struct {
 	registerPort  int
 
 	config *ControllerServerConfig
+
+	// only for test
+	allowDectecting   bool
+	allowSwitchBakcup bool
 }
 
 func (server *ControllerServer) GetSessions(context.Context, *pb.GetSessionsRequest) (*pb.GetSessionsReply, error) {
@@ -135,6 +139,22 @@ func (server *ControllerServer) RegsiterNewSession(_ context.Context, request *p
 	return &reply, nil
 }
 
+func (server *ControllerServer) DisAllowDectecting() {
+	server.allowDectecting = false
+}
+
+func (server *ControllerServer) AllowDectecting() {
+	server.allowDectecting = true
+}
+
+func (server *ControllerServer) DisAllowSwitchBakcup() {
+	server.allowSwitchBakcup = false
+}
+
+func (server *ControllerServer) AllowSwitchBakcup() {
+	server.allowSwitchBakcup = true
+}
+
 func NewSessionControllerServer(config *ControllerServerConfig, serverSide bool) *ControllerServer {
 	s := &ControllerServer{}
 
@@ -142,6 +162,8 @@ func NewSessionControllerServer(config *ControllerServerConfig, serverSide bool)
 		config = NewDefaultConfig()
 	}
 	s.config = config
+	s.allowDectecting = true
+	s.allowSwitchBakcup = true
 
 	rpcAddr := fmt.Sprintf("%s:%d", config.controllerIP, config.controllerPort)
 	li, err := net.Listen("tcp", rpcAddr)
@@ -198,6 +220,8 @@ func LoopExistMetered(sessMonitor *UDPSessionMonitor, detectRate float64) (typeC
 
 	dSegmentACKed := cSegmentACKed - sessMonitor.lastSegmentAcked
 	dSegmentPromotedACKed := cSegmentPromotedACKed - sessMonitor.lastSegmentPromotedAcked
+
+	LogInfo("Loop detect route status. dSegmentACKed: %d, dSegmentPromotedACKed: %d", dSegmentACKed, dSegmentPromotedACKed)
 
 	if dSegmentACKed != 0 && (float64(dSegmentPromotedACKed)/float64(dSegmentACKed) > detectRate) {
 		// change to only meter route
@@ -352,8 +376,8 @@ func DetectOriginRoute(interval uint64, controller *ControllerServer) {
 
 }
 
-func backUpRouteWakeUp(sess *UDPSession, controller *ControllerServer) error {
-	if sess.ownConn || sess.conn != nil {
+func backupRouteWakeUp(sess *UDPSession, controller *ControllerServer) error {
+	if !sess.ownConn || sess.conn == nil {
 		return errors.New("invalid session.")
 	}
 
@@ -375,6 +399,7 @@ func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, control
 	sessMonitor := new(UDPSessionMonitor)
 
 	for {
+
 		changed := false
 		if globalSessionType == SessionTypeExistMetered {
 			changed = LoopExistMetered(sessMonitor, detectRate)
@@ -382,10 +407,11 @@ func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, control
 
 		if globalSessionType == SessionTypeOnlyMetered {
 			if controller != nil {
-				if controller.config.enableOriginRouteDetect && atomic.LoadInt32(&controller.isDectecting) == 0 {
+				LogInfo("controller.newRegistered: %t, controller.allowSwitchBakcup: %t", controller.newRegistered, controller.allowSwitchBakcup)
+				if controller.config.enableOriginRouteDetect && atomic.LoadInt32(&controller.isDectecting) == 0 && controller.allowDectecting {
 					go DetectOriginRoute(interval, controller)
-				} else if controller.newRegistered {
-					err := backUpRouteWakeUp(sess, controller)
+				} else if controller.newRegistered && controller.allowSwitchBakcup {
+					err := backupRouteWakeUp(sess, controller)
 					if err != nil {
 						LogError("backup route is invalid, error: %s", err)
 					} else {
