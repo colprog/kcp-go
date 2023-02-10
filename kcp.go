@@ -712,7 +712,6 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	buffer := kcp.buffer
 	ptr := buffer[kcp.reserved:] // keep n bytes untouched
 	sendAllAcksMetered := kcp.send_all_acks_through_metered_ip
-	aggressiveness := kcp.metered_ip_aggressiveness
 
 	// makeSpace makes room for writing
 	makeSpace := func(space int, important bool) bool {
@@ -826,13 +825,9 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	}
 	if newSegsCount > 0 {
 		kcp.snd_queue = kcp.remove_front(kcp.snd_queue, newSegsCount)
-	} else {
-		// 滑动窗口若无进展（窗口满或无新数据），提高发送优先级，希望能推动窗口进展
-		if aggressiveness >= 1 {
-			promoteToImportant = true
-		} else {
-			promoteToImportant = flushACK(true) || promoteToImportant
-		}
+	} else if len(kcp.snd_queue) > 0 {
+		// 发送窗口若无进展，提高发送优先级，希望能推动窗口进展
+		promoteToImportant = true
 	}
 
 	// calculate resent
@@ -857,6 +852,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	for k := range ref {
 		segment := &ref[k]
 		needsend := false
+		isRTOCapped := false
 		if segment.acked == 1 {
 			continue
 		}
@@ -888,6 +884,12 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			segment.fastack = 0
 			segment.resendts = current + segment.rto
 			lostSegs++
+		} else if segment.xmit > 0 && _itimediff(current, segment.ts) > 300 {
+			needsend = true
+			isRTOCapped = true
+			segment.fastack = 0
+			segment.rto = kcp.rx_rto
+			segment.resendts = current + segment.rto
 		}
 
 		if needsend {
@@ -897,7 +899,9 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			segment.wnd = seg.wnd
 			segment.una = seg.una
 
-			willPromote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
+			willPromote := segment.xmit >= 3 ||
+				(segment.xmit >= 2 && len(kcp.acklist) > 0) ||
+				isRTOCapped
 			flushACK(willPromote || promoteToImportant)
 
 			need := IKCP_OVERHEAD + len(segment.data)
