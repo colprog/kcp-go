@@ -505,6 +505,12 @@ func (s *UDPSession) SetNoDelay(nodelay, interval, resend, nc int) {
 	s.kcp.NoDelay(nodelay, interval, resend, nc)
 }
 
+func (s *UDPSession) ConfigMeteredIpUsage(all_acks bool, aggressiveness int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.kcp.ConfigMeteredIpUsage(all_acks, aggressiveness)
+}
+
 // SetDSCP sets the 6bit DSCP field in IPv4 header, or 8bit Traffic Class in IPv6 header.
 //
 // if the underlying connection has implemented `func SetDSCP(int) error`, SetDSCP() will invoke
