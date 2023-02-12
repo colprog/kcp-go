@@ -42,7 +42,7 @@ type (
 		dropKcpAckRate float64
 		dropOn         bool
 
-		contollerServer *ControllerServer
+		contollerServer *SessionController
 	}
 )
 
@@ -126,7 +126,7 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 				s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, false, addr, l.block)
 
 				if l.contollerServer != nil {
-					s.SetControllerServer(l.contollerServer)
+					s.SetSessionController(l.contollerServer)
 				}
 				s.kcpInput(data, isFromMeteredIP)
 				l.sessionLock.Lock()
@@ -152,11 +152,11 @@ func (l *Listener) notifyReadError(err error) {
 	})
 }
 
-func (l *Listener) NewControllerConfig(controllerConfig *ControllerServerConfig) (err error) {
+func (l *Listener) NewControllerConfig(controllerConfig *SessionControllerConfig, startGRPC bool) (err error) {
 	if len(l.sessions) != 0 || len(l.sessionAlias) != 0 {
 		return errors.New("already exist session, should create controller server before session in.")
 	}
-	l.contollerServer = NewSessionControllerServer(controllerConfig, true)
+	l.contollerServer = NewSessionController(controllerConfig, true, startGRPC)
 	return nil
 }
 

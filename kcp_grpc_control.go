@@ -17,7 +17,7 @@ const (
 	DETECTION_MAGIC = 0x13213d
 )
 
-type ControllerServerConfig struct {
+type SessionControllerConfig struct {
 	// server side control config
 	controllerIP   string
 	controllerPort int
@@ -37,16 +37,16 @@ type ControllerServerConfig struct {
 	detectPackageNumbersEachTimes uint16
 }
 
-func (c *ControllerServerConfig) SetControllerIP(ip string) {
+func (c *SessionControllerConfig) SetControllerIP(ip string) {
 	c.controllerIP = ip
 }
 
-func (c *ControllerServerConfig) SetControllerPort(port int) {
+func (c *SessionControllerConfig) SetControllerPort(port int) {
 	c.controllerPort = port
 }
 
-func NewDefaultConfig() *ControllerServerConfig {
-	c := new(ControllerServerConfig)
+func NewDefaultConfig() *SessionControllerConfig {
+	c := new(SessionControllerConfig)
 	c.controllerIP = "0.0.0.0"
 	c.controllerPort = 10720
 	c.enableOriginRouteDetect = true
@@ -59,9 +59,7 @@ func NewDefaultConfig() *ControllerServerConfig {
 	return c
 }
 
-type ControllerServer struct {
-	pb.UnimplementedKCPSessionCtlServer
-
+type SessionController struct {
 	// 0 means no dectecting
 	// 1 means dectecting
 	// -1 means dectection fail
@@ -72,15 +70,28 @@ type ControllerServer struct {
 	registerIP    string
 	registerPort  int
 
-	config *ControllerServerConfig
+	config *SessionControllerConfig
 
 	// only for test
 	allowDectecting   bool
 	allowSwitchBakcup bool
 }
 
-func (server *ControllerServer) GetSessions(context.Context, *pb.GetSessionsRequest) (*pb.GetSessionsReply, error) {
+// structure used to register grpc
+// The structure is decoupled from SessionController
+// After kcp-vpn registered grpc, the grpc service must not be used
+type SessionControllerServer struct {
+	pb.UnimplementedKCPSessionCtlServer
+
+	sessionController *SessionController
+}
+
+func (server *SessionControllerServer) GetSessions(context.Context, *pb.GetSessionsRequest) (*pb.GetSessionsReply, error) {
 	reply := pb.GetSessionsReply{}
+
+	if server.sessionController == nil {
+		return &reply, errors.New("SessionController have not been inited.")
+	}
 
 	if DefaultSnmp == nil {
 		DefaultSnmp = newSnmp()
@@ -130,33 +141,41 @@ func (server *ControllerServer) GetSessions(context.Context, *pb.GetSessionsRequ
 	return &reply, nil
 }
 
-func (server *ControllerServer) RegsiterNewSession(_ context.Context, request *pb.RegsiterNewSessionRequest) (*pb.RegsiterNewSessionReply, error) {
+func (server *SessionControllerServer) RegsiterNewSession(_ context.Context, request *pb.RegsiterNewSessionRequest) (*pb.RegsiterNewSessionReply, error) {
 	reply := pb.RegsiterNewSessionReply{}
-	server.newRegistered = true
-	server.registerIP = request.IpAddress
-	server.registerPort = int(request.Port)
+	if server.sessionController == nil {
+		return &reply, errors.New("SessionController have not been inited.")
+	}
+
+	server.sessionController.RegsiterNewRoute(request.IpAddress, request.Port)
 
 	return &reply, nil
 }
 
-func (server *ControllerServer) DisAllowDectecting() {
-	server.allowDectecting = false
+func (sessionController *SessionController) RegsiterNewRoute(IpAddress string, Port int32) {
+	sessionController.newRegistered = true
+	sessionController.registerIP = IpAddress
+	sessionController.registerPort = int(Port)
 }
 
-func (server *ControllerServer) AllowDectecting() {
-	server.allowDectecting = true
+func (sessionController *SessionController) DisAllowDectecting() {
+	sessionController.allowDectecting = false
 }
 
-func (server *ControllerServer) DisAllowSwitchBakcup() {
-	server.allowSwitchBakcup = false
+func (sessionController *SessionController) AllowDectecting() {
+	sessionController.allowDectecting = true
 }
 
-func (server *ControllerServer) AllowSwitchBakcup() {
-	server.allowSwitchBakcup = true
+func (sessionController *SessionController) DisAllowSwitchBakcup() {
+	sessionController.allowSwitchBakcup = false
 }
 
-func NewSessionControllerServer(config *ControllerServerConfig, serverSide bool) *ControllerServer {
-	s := &ControllerServer{}
+func (sessionController *SessionController) AllowSwitchBakcup() {
+	sessionController.allowSwitchBakcup = true
+}
+
+func NewSessionController(config *SessionControllerConfig, serverSide bool, startGRPC bool) *SessionController {
+	s := &SessionController{}
 
 	if config == nil {
 		config = NewDefaultConfig()
@@ -165,18 +184,25 @@ func NewSessionControllerServer(config *ControllerServerConfig, serverSide bool)
 	s.allowDectecting = true
 	s.allowSwitchBakcup = true
 
-	rpcAddr := fmt.Sprintf("%s:%d", config.controllerIP, config.controllerPort)
-	li, err := net.Listen("tcp", rpcAddr)
-	if err != nil {
-		LogFatalf("failed to listen: %v", err)
-	}
+	if startGRPC {
+		sessionControllerServer := SessionControllerServer{}
+		sessionControllerServer.sessionController = s
 
-	LogInfo("Controller listening on %s\n", rpcAddr)
-	go func() {
-		grpcServer := grpc.NewServer()
-		pb.RegisterKCPSessionCtlServer(grpcServer, s)
-		grpcServer.Serve(li)
-	}()
+		rpcAddr := fmt.Sprintf("%s:%d", config.controllerIP, config.controllerPort)
+		li, err := net.Listen("tcp", rpcAddr)
+		if err != nil {
+			LogFatalf("failed to listen: %v", err)
+		}
+
+		LogInfo("Controller listening on %s\n", rpcAddr)
+		go func() {
+			grpcServer := grpc.NewServer()
+			pb.RegisterKCPSessionCtlServer(grpcServer, &sessionControllerServer)
+			grpcServer.Serve(li)
+		}()
+	} else {
+		LogInfo("Controller GRPC is disabled")
+	}
 
 	if serverSide && config.allowDetect {
 		go func() {
@@ -201,7 +227,7 @@ func NewSessionControllerServer(config *ControllerServerConfig, serverSide bool)
 	return s
 }
 
-func (server *ControllerServer) resetRegisterServer() {
+func (server *SessionController) resetRegisterServer() {
 	server.newRegistered = false
 }
 
@@ -298,7 +324,7 @@ func DetectPackageVerify(data []byte, rev_size int) (verifed bool) {
 	return
 }
 
-func DetectOriginRouteProcess(interval uint64, controller *ControllerServer) (changed bool) {
+func DetectOriginRouteProcess(interval uint64, controller *SessionController) (changed bool) {
 	changed = false
 	buf := make([]byte, IKCP_ALIVE_DETECTION)
 	ikcp_encode32u(buf, DETECTION_MAGIC)
@@ -365,7 +391,7 @@ func DetectOriginRouteProcess(interval uint64, controller *ControllerServer) (ch
 	return
 }
 
-func DetectOriginRoute(interval uint64, controller *ControllerServer) {
+func DetectOriginRoute(interval uint64, controller *SessionController) {
 	atomic.StoreInt32(&controller.isDectecting, 1)
 	if DetectOriginRouteProcess(interval, controller) {
 		RunningAsExistMetered()
@@ -376,7 +402,7 @@ func DetectOriginRoute(interval uint64, controller *ControllerServer) {
 
 }
 
-func backupRouteWakeUp(sess *UDPSession, controller *ControllerServer) error {
+func backupRouteWakeUp(sess *UDPSession, controller *SessionController) error {
 	if !sess.ownConn || sess.conn == nil {
 		return errors.New("invalid session.")
 	}
@@ -390,7 +416,7 @@ func backupRouteWakeUp(sess *UDPSession, controller *ControllerServer) error {
 	return nil
 }
 
-func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, controller *ControllerServer) {
+func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, controller *SessionController) {
 	// Monitor disabled
 	if globalSessionType == SessionTypeNormal {
 		return

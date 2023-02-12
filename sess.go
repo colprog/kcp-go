@@ -120,7 +120,7 @@ type (
 		socketWriteErrorOnce sync.Once
 
 		// grpc controller server
-		controller *ControllerServer
+		controller *SessionController
 
 		// nonce generator
 		nonce Entropy
@@ -245,7 +245,7 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	return sess
 }
 
-func (sess *UDPSession) SetControllerServer(controller *ControllerServer) {
+func (sess *UDPSession) SetSessionController(controller *SessionController) {
 	sess.controller = controller
 }
 
@@ -769,7 +769,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 			}
 			recovers := s.fecDecoder.decode(f)
 			if f.flag() == typeData {
-				if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, isFromMeteredIP, s.ackNoDelay, s.controller); ret != 0 {
+				if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, isFromMeteredIP, s.ackNoDelay); ret != 0 {
 					kcpInErrors++
 				}
 			}
@@ -778,7 +778,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 				if len(r) >= 2 { // must be larger than 2bytes
 					sz := binary.LittleEndian.Uint16(r)
 					if int(sz) <= len(r) && sz >= 2 {
-						if ret := s.kcp.Input(r[2:sz], false, isFromMeteredIP, s.ackNoDelay, s.controller); ret == 0 {
+						if ret := s.kcp.Input(r[2:sz], false, isFromMeteredIP, s.ackNoDelay); ret == 0 {
 							fecRecovered++
 						} else {
 							kcpInErrors++
@@ -810,7 +810,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 		}
 	} else {
 		s.mu.Lock()
-		if ret := s.kcp.Input(data, true, isFromMeteredIP, s.ackNoDelay, s.controller); ret != 0 {
+		if ret := s.kcp.Input(data, true, isFromMeteredIP, s.ackNoDelay); ret != 0 {
 			kcpInErrors++
 		}
 		if n := s.kcp.PeekSize(); n > 0 {

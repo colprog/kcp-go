@@ -352,7 +352,7 @@ func startServer(args *BenchSerOps) error {
 		return err
 	}
 
-	slowListener.NewControllerConfig(nil)
+	slowListener.NewControllerConfig(nil, true)
 
 	snmpTicker := startServerSnmpTricker(args)
 	defer snmpTicker.Stop()
@@ -395,7 +395,7 @@ func start(args *BenchCliOps) error {
 
 		cliConfig := kcp.NewDefaultConfig()
 		cliConfig.SetControllerPort(10721)
-		sess.SetControllerServer(kcp.NewSessionControllerServer(cliConfig, false))
+		sess.SetSessionController(kcp.NewSessionController(cliConfig, false, true))
 
 		if args.monitor_interval != 0 {
 			err := sess.EnableMonitor(uint64(args.monitor_interval), args.detect_rate)

@@ -105,6 +105,10 @@ func processServerSignal(l *Listener) {
 }
 
 func startServer(t *testing.T) {
+	startServer2(t, true)
+}
+
+func startServer2(t *testing.T, enableGRPC bool) {
 	LogTest("Test server side started.")
 	var err error
 
@@ -121,7 +125,7 @@ func startServer(t *testing.T) {
 
 	listener.dropOff()
 
-	listener.NewControllerConfig(&ControllerServerConfig{
+	listener.NewControllerConfig(&SessionControllerConfig{
 		controllerIP:   controlIp,
 		controllerPort: controlPort,
 		allowDetect:    true,
@@ -134,7 +138,7 @@ func startServer(t *testing.T) {
 		satisfyingDetectionRate:       0,
 		routeDetectTimes:              0,
 		detectPackageNumbersEachTimes: 0,
-	})
+	}, enableGRPC)
 	if t != nil {
 		go processRoutineServerSignal(listener)
 	} else {
@@ -193,7 +197,7 @@ func startClient(t *testing.T) {
 
 	cliSession.SetMeteredAddr(meteredIp, uint16(meteredPort), true)
 
-	cliConfig := &ControllerServerConfig{
+	cliConfig := &SessionControllerConfig{
 		controllerIP:   controlIp,
 		controllerPort: clientControlPort,
 
@@ -208,7 +212,7 @@ func startClient(t *testing.T) {
 		routeDetectTimes:              10,
 		detectPackageNumbersEachTimes: 10,
 	}
-	cliSession.SetControllerServer(NewSessionControllerServer(cliConfig, false))
+	cliSession.SetSessionController(NewSessionController(cliConfig, false, true))
 
 	go processClientSignal(cliSession)
 
@@ -223,6 +227,26 @@ func startClient(t *testing.T) {
 		assert.NoError(t, err)
 		time.Sleep(time.Millisecond * 500)
 	}
+}
+
+func TestStartServerWithoutGRPC(t *testing.T) {
+	go startServer2(t, false)
+	time.Sleep(time.Second * 10)
+	assert.NotEqual(t, nil, listener)
+	assert.NotEqual(t, nil, listener.conn)
+
+	// still can create client
+	conn, err := grpc.Dial(fmt.Sprintf("%s:%d", controlIp, controlPort), grpc.WithInsecure())
+	assert.NoError(t, err)
+	assert.NotEqual(t, conn, nil)
+	KCPSessionCtlCli := grpc_control.NewKCPSessionCtlClient(conn)
+	assert.NotEqual(t, nil, KCPSessionCtlCli)
+
+	// but will fail to call grpc function
+	_, err = KCPSessionCtlCli.GetSessions(context.Background(), &grpc_control.GetSessionsRequest{})
+	assert.Error(t, err)
+
+	chanServer <- ServerCloseSignal
 }
 
 func TestStartServer(t *testing.T) {

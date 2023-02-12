@@ -566,7 +566,7 @@ func (kcp *KCP) parse_data(newseg segment) bool {
 // codecs.
 //
 // 'ackNoDelay' will trigger immediate ACK, but surely it will not be efficient in bandwidth
-func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool, controller *ControllerServer) int {
+func (kcp *KCP) Input(data []byte, regular, fromMetered, ackNoDelay bool) int {
 	snd_una := kcp.snd_una
 
 	if len(data) < IKCP_OVERHEAD {
