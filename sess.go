@@ -53,14 +53,23 @@ var (
 )
 
 const (
+	SessionTypeOnlyMeteredMin int32 = SessionTypeNormal
+
 	SessionTypeNormal       int32 = 0
 	SessionTypeExistMetered int32 = 1
 	SessionTypeOnlyMetered  int32 = 2
+
+	SessionTypeOnlyMeteredMax int32 = SessionTypeOnlyMetered
 )
 
 var (
 	globalSessionType int32 = SessionTypeNormal
 )
+
+func RunningAsNormal() {
+	atomic.StoreInt32(&globalSessionType, SessionTypeNormal)
+	LogInfo("current session running as SessionTypeNormal")
+}
 
 func RunningAsExistMetered() {
 	atomic.StoreInt32(&globalSessionType, SessionTypeExistMetered)

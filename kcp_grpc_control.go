@@ -77,81 +77,6 @@ type SessionController struct {
 	allowSwitchBakcup bool
 }
 
-// structure used to register grpc
-// The structure is decoupled from SessionController
-// After kcp-vpn registered grpc, the grpc service must not be used
-type SessionControllerServer struct {
-	pb.UnimplementedKCPSessionCtlServer
-
-	sessionController *SessionController
-}
-
-func (server *SessionControllerServer) GetSessions(context.Context, *pb.GetSessionsRequest) (*pb.GetSessionsReply, error) {
-	reply := pb.GetSessionsReply{}
-
-	if server.sessionController == nil {
-		return &reply, errors.New("SessionController have not been inited.")
-	}
-
-	if DefaultSnmp == nil {
-		DefaultSnmp = newSnmp()
-	}
-
-	s := DefaultSnmp.Copy()
-	reply.Connections = make([]*pb.ConnectionInfo, 1)
-	d := new(pb.ConnectionInfo)
-
-	d.SentBytes = atomic.LoadUint64(&s.BytesSent)
-	d.RecvBytes = atomic.LoadUint64(&s.BytesReceived)
-	d.DroptBytes = atomic.LoadUint64(&s.BytesDropt)
-	d.MaxConn = atomic.LoadUint64(&s.MaxConn)
-	d.ActiveOpens = atomic.LoadUint64(&s.ActiveOpens)
-	d.PassiveOpens = atomic.LoadUint64(&s.PassiveOpens)
-	d.CurrEstab = atomic.LoadUint64(&s.CurrEstab)
-	d.InErrs = atomic.LoadUint64(&s.InErrs)
-	d.InCsumErrs = atomic.LoadUint64(&s.InCsumErrors)
-	d.KcpInErrs = atomic.LoadUint64(&s.KCPInErrors)
-	d.InPkts = atomic.LoadUint64(&s.InPkts)
-	d.OutPkts = atomic.LoadUint64(&s.OutPkts)
-	d.InSegs = atomic.LoadUint64(&s.InSegs)
-	d.OutSegs = atomic.LoadUint64(&s.OutSegs)
-	d.InBytes = atomic.LoadUint64(&s.InBytes)
-	d.OutBytes = atomic.LoadUint64(&s.OutBytes)
-	d.RetransSegs = atomic.LoadUint64(&s.RetransSegs)
-	d.FastRetransSegs = atomic.LoadUint64(&s.FastRetransSegs)
-	d.EarlyRetransSegs = atomic.LoadUint64(&s.EarlyRetransSegs)
-	d.LostSegs = atomic.LoadUint64(&s.LostSegs)
-	d.RepeatSegs = atomic.LoadUint64(&s.RepeatSegs)
-	d.FecParityShards = atomic.LoadUint64(&s.FECParityShards)
-	d.FecErrs = atomic.LoadUint64(&s.FECErrs)
-	d.FecRecovered = atomic.LoadUint64(&s.FECRecovered)
-	d.FecShortShards = atomic.LoadUint64(&s.FECShortShards)
-
-	d.BytesSentFromNoMetered = atomic.LoadUint64(&s.BytesSentFromNoMeteredRaw)
-	d.BytesSentFromMetered = atomic.LoadUint64(&s.BytesSentFromMeteredRaw)
-	d.BytesRecvFromNoMetered = atomic.LoadUint64(&s.BytesReceivedFromNoMeteredRaw)
-	d.BytesRecvFromMetered = atomic.LoadUint64(&s.BytesReceivedFromMeteredRaw)
-	d.SegsAcked = atomic.LoadUint64(&s.SegmentNumbersACKed)
-	d.SegsPromoteAcked = atomic.LoadUint64(&s.SegmentNumbersPromotedACKed)
-
-	d.Status = pb.SessionStatus(globalSessionType)
-
-	reply.Connections[0] = d
-
-	return &reply, nil
-}
-
-func (server *SessionControllerServer) RegsiterNewSession(_ context.Context, request *pb.RegsiterNewSessionRequest) (*pb.RegsiterNewSessionReply, error) {
-	reply := pb.RegsiterNewSessionReply{}
-	if server.sessionController == nil {
-		return &reply, errors.New("SessionController have not been inited.")
-	}
-
-	server.sessionController.RegsiterNewRoute(request.IpAddress, request.Port)
-
-	return &reply, nil
-}
-
 func (sessionController *SessionController) RegsiterNewRoute(IpAddress string, Port int32) {
 	sessionController.newRegistered = true
 	sessionController.registerIP = IpAddress
@@ -172,6 +97,26 @@ func (sessionController *SessionController) DisAllowSwitchBakcup() {
 
 func (sessionController *SessionController) AllowSwitchBakcup() {
 	sessionController.allowSwitchBakcup = true
+}
+
+func (sessionController *SessionController) SwitchGlobalSessionType(sessionType int32) error {
+
+	switch sessionType {
+	case SessionTypeNormal:
+		RunningAsNormal()
+	case SessionTypeExistMetered:
+		RunningAsExistMetered()
+	case SessionTypeOnlyMetered:
+		RunningAsOnlyMetered()
+	default:
+		return errors.New(fmt.Sprintf("Inavlid sessionType, sessionType should between [%d,%d]",
+			SessionTypeOnlyMeteredMin, SessionTypeOnlyMeteredMax))
+	}
+	return nil
+}
+
+func (sessionController *SessionController) GetGlobalSessionTypeValue() int32 {
+	return atomic.LoadInt32(&globalSessionType)
 }
 
 func NewSessionController(config *SessionControllerConfig, serverSide bool, startGRPC bool) *SessionController {
@@ -229,6 +174,83 @@ func NewSessionController(config *SessionControllerConfig, serverSide bool, star
 
 func (server *SessionController) resetRegisterServer() {
 	server.newRegistered = false
+}
+
+// structure used to register grpc
+// The structure is decoupled from SessionController
+// After kcp-vpn registered grpc, the grpc service must not be used
+type SessionControllerServer struct {
+	pb.UnimplementedKCPSessionCtlServer
+
+	sessionController *SessionController
+}
+
+func (server *SessionControllerServer) GetSessions(context.Context, *pb.GetSessionsRequest) (*pb.GetSessionsReply, error) {
+	reply := pb.GetSessionsReply{}
+
+	if server.sessionController == nil {
+		return &reply, errors.New("SessionController have not been inited.")
+	}
+
+	if DefaultSnmp == nil {
+		DefaultSnmp = newSnmp()
+	}
+
+	s := DefaultSnmp.Copy()
+	reply.Connections = make([]*pb.ConnectionInfo, 1)
+	d := new(pb.ConnectionInfo)
+
+	// No need atomic load here
+	// Cause s = s.Copy()
+	d.SentBytes = s.BytesSent
+	d.RecvBytes = s.BytesReceived
+	d.DroptBytes = s.BytesDropt
+	d.MaxConn = s.MaxConn
+	d.ActiveOpens = s.ActiveOpens
+	d.PassiveOpens = s.PassiveOpens
+	d.CurrEstab = s.CurrEstab
+	d.InErrs = s.InErrs
+	d.InCsumErrs = s.InCsumErrors
+	d.KcpInErrs = s.KCPInErrors
+	d.InPkts = s.InPkts
+	d.OutPkts = s.OutPkts
+	d.InSegs = s.InSegs
+	d.OutSegs = s.OutSegs
+	d.InBytes = s.InBytes
+	d.OutBytes = s.OutBytes
+	d.RetransSegs = s.RetransSegs
+	d.FastRetransSegs = s.FastRetransSegs
+	d.EarlyRetransSegs = s.EarlyRetransSegs
+	d.LostSegs = s.LostSegs
+	d.RepeatSegs = s.RepeatSegs
+	d.FecParityShards = s.FECParityShards
+	d.FecErrs = s.FECErrs
+	d.FecRecovered = s.FECRecovered
+	d.FecShortShards = s.FECShortShards
+
+	d.BytesSentFromNoMetered = s.BytesSentFromNoMeteredRaw
+	d.BytesSentFromMetered = s.BytesSentFromMeteredRaw
+	d.BytesRecvFromNoMetered = s.BytesReceivedFromNoMeteredRaw
+	d.BytesRecvFromMetered = s.BytesReceivedFromMeteredRaw
+	d.SegsAcked = s.SegmentNumbersACKed
+	d.SegsPromoteAcked = s.SegmentNumbersPromotedACKed
+
+	d.Status = pb.SessionStatus(atomic.LoadInt32(&globalSessionType))
+
+	reply.Connections[0] = d
+
+	return &reply, nil
+}
+
+func (server *SessionControllerServer) RegsiterNewSession(_ context.Context, request *pb.RegsiterNewSessionRequest) (*pb.RegsiterNewSessionReply, error) {
+	reply := pb.RegsiterNewSessionReply{}
+	if server.sessionController == nil {
+		return &reply, errors.New("SessionController have not been inited.")
+	}
+
+	server.sessionController.RegsiterNewRoute(request.IpAddress, request.Port)
+
+	return &reply, nil
 }
 
 func LoopExistMetered(sessMonitor *UDPSessionMonitor, detectRate float64) (typeChanged bool) {
