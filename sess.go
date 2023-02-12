@@ -81,6 +81,20 @@ func RunningAsOnlyMetered() {
 	LogInfo("current session running as SessionTypeOnlyMetered")
 }
 
+func SessionTypeDealImportPackage(shouldAddToMeteredQ bool) bool {
+
+	if globalSessionType == SessionTypeNormal {
+		shouldAddToMeteredQ = false
+	} else if globalSessionType == SessionTypeOnlyMetered {
+		shouldAddToMeteredQ = true
+	}
+
+	// if globalSessionType == SessionTypeExistMetered
+	// Then shouldAddToMeteredQ should not be changed
+
+	return shouldAddToMeteredQ
+}
+
 func init() {
 	xmitBuf.New = func() interface{} {
 		return make([]byte, mtuLimit)
@@ -631,6 +645,7 @@ func (s *UDPSession) output(buf []byte, important bool) {
 	}
 
 	shouldAddToMeteredQ := important && s.meteredRemote != nil
+	shouldAddToMeteredQ = SessionTypeDealImportPackage(shouldAddToMeteredQ)
 
 	// 4. TxQueue
 	var msg ipv4.Message
@@ -638,10 +653,6 @@ func (s *UDPSession) output(buf []byte, important bool) {
 		length := len(buf)
 		bts := xmitBuf.Get().([]byte)[:length]
 		copy(bts, buf)
-
-		if globalSessionType == SessionTypeOnlyMetered {
-			shouldAddToMeteredQ = true
-		}
 
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
@@ -897,11 +908,9 @@ func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err err
 		return errors.New("can not enable monitor, If there no metered remote set")
 	}
 
-	if globalSessionType != SessionTypeNormal {
-		return errors.New("already enabled monitor")
-	}
-
+	// FIXME: should it outside?
 	RunningAsExistMetered()
+
 	LogInfo("enabled monitor, monitor stared. interval=%d,detectRate=%f \n", interval, detectRate)
 	go MonitorStart(s, interval, detectRate, s.controller)
 

@@ -439,14 +439,15 @@ func backupRouteWakeUp(sess *UDPSession, controller *SessionController) error {
 }
 
 func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, controller *SessionController) {
-	// Monitor disabled
-	if globalSessionType == SessionTypeNormal {
-		return
-	}
+	// Allow SessionTypeNormal in dectection
 
 	sessMonitor := new(UDPSessionMonitor)
 
 	for {
+
+		// After MonitorStart, user may switch the session type by GRPC
+		// if globalSessionType == SessionTypeNormal
+		// Then just do nothing
 
 		changed := false
 		if globalSessionType == SessionTypeExistMetered {

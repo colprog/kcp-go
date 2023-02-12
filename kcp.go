@@ -926,7 +926,9 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			segment.una = seg.una
 
 			willPromote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
-			if willPromote || promoteToImportant {
+			// If globalSessionType is SessionTypeNormal
+			// Then current segment or ack won't be promote in `output`
+			if (willPromote || promoteToImportant) && globalSessionType != SessionTypeNormal {
 				segment.has_promote = true
 			}
 			flushACK(willPromote || promoteToImportant)
