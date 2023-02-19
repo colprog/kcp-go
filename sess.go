@@ -53,14 +53,23 @@ var (
 )
 
 const (
+	SessionTypeOnlyMeteredMin int32 = SessionTypeNormal
+
 	SessionTypeNormal       int32 = 0
 	SessionTypeExistMetered int32 = 1
 	SessionTypeOnlyMetered  int32 = 2
+
+	SessionTypeOnlyMeteredMax int32 = SessionTypeOnlyMetered
 )
 
 var (
 	globalSessionType int32 = SessionTypeNormal
 )
+
+func RunningAsNormal() {
+	atomic.StoreInt32(&globalSessionType, SessionTypeNormal)
+	LogInfo("current session running as SessionTypeNormal")
+}
 
 func RunningAsExistMetered() {
 	atomic.StoreInt32(&globalSessionType, SessionTypeExistMetered)
@@ -70,6 +79,20 @@ func RunningAsExistMetered() {
 func RunningAsOnlyMetered() {
 	atomic.StoreInt32(&globalSessionType, SessionTypeOnlyMetered)
 	LogInfo("current session running as SessionTypeOnlyMetered")
+}
+
+func SessionTypeDealImportPackage(shouldAddToMeteredQ bool, existMeterRoute bool) bool {
+
+	if globalSessionType == SessionTypeNormal {
+		shouldAddToMeteredQ = false
+	} else if globalSessionType == SessionTypeOnlyMetered && existMeterRoute {
+		shouldAddToMeteredQ = true
+	}
+
+	// if globalSessionType == SessionTypeExistMetered
+	// Then shouldAddToMeteredQ should not be changed
+
+	return shouldAddToMeteredQ
 }
 
 func init() {
@@ -120,7 +143,7 @@ type (
 		socketWriteErrorOnce sync.Once
 
 		// grpc controller server
-		controller *ControllerServer
+		controller *SessionController
 
 		// nonce generator
 		nonce Entropy
@@ -245,7 +268,7 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	return sess
 }
 
-func (sess *UDPSession) SetControllerServer(controller *ControllerServer) {
+func (sess *UDPSession) SetSessionController(controller *SessionController) {
 	sess.controller = controller
 }
 
@@ -622,6 +645,7 @@ func (s *UDPSession) output(buf []byte, important bool) {
 	}
 
 	shouldAddToMeteredQ := important && s.meteredRemote != nil
+	shouldAddToMeteredQ = SessionTypeDealImportPackage(shouldAddToMeteredQ, s.meteredRemote != nil)
 
 	// 4. TxQueue
 	var msg ipv4.Message
@@ -629,10 +653,6 @@ func (s *UDPSession) output(buf []byte, important bool) {
 		length := len(buf)
 		bts := xmitBuf.Get().([]byte)[:length]
 		copy(bts, buf)
-
-		if globalSessionType == SessionTypeOnlyMetered {
-			shouldAddToMeteredQ = true
-		}
 
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
@@ -769,7 +789,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 			}
 			recovers := s.fecDecoder.decode(f)
 			if f.flag() == typeData {
-				if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, isFromMeteredIP, s.ackNoDelay, s.controller); ret != 0 {
+				if ret := s.kcp.Input(data[fecHeaderSizePlus2:], true, isFromMeteredIP, s.ackNoDelay); ret != 0 {
 					kcpInErrors++
 				}
 			}
@@ -778,7 +798,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 				if len(r) >= 2 { // must be larger than 2bytes
 					sz := binary.LittleEndian.Uint16(r)
 					if int(sz) <= len(r) && sz >= 2 {
-						if ret := s.kcp.Input(r[2:sz], false, isFromMeteredIP, s.ackNoDelay, s.controller); ret == 0 {
+						if ret := s.kcp.Input(r[2:sz], false, isFromMeteredIP, s.ackNoDelay); ret == 0 {
 							fecRecovered++
 						} else {
 							kcpInErrors++
@@ -810,7 +830,7 @@ func (s *UDPSession) kcpInput(data []byte, isFromMeteredIP bool) {
 		}
 	} else {
 		s.mu.Lock()
-		if ret := s.kcp.Input(data, true, isFromMeteredIP, s.ackNoDelay, s.controller); ret != 0 {
+		if ret := s.kcp.Input(data, true, isFromMeteredIP, s.ackNoDelay); ret != 0 {
 			kcpInErrors++
 		}
 		if n := s.kcp.PeekSize(); n > 0 {
@@ -882,30 +902,26 @@ func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
 	return s.meteredRemote
 }
 
-func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err error) {
+func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) {
 
 	if s.meteredRemote == nil {
-		return errors.New("can not enable monitor, If there no metered remote set")
+		LogWarn("Without meter ip assigned.")
+		RunningAsNormal()
+	} else {
+		RunningAsExistMetered()
 	}
 
-	if globalSessionType != SessionTypeNormal {
-		return errors.New("already enabled monitor")
-	}
-
-	RunningAsExistMetered()
-	LogInfo("enabled monitor, monitor stared. interval=%d,detectRate=%f \n", interval, detectRate)
+	LogInfo("Enabled monitor, monitor stared. interval=%d,detectRate=%f. global session type is %d \n", interval, detectRate, globalSessionType)
 	go MonitorStart(s, interval, detectRate, s.controller)
-
-	return nil
 }
 
 // Dial connects to the remote address "raddr" on the network "udp" without encryption and FEC
 func Dial(raddr string) (*UDPSession, error) {
-	return DialWithOptions(raddr, nil, 0, 0, nil, InfoLevelLog)
+	return DialWithOptions(raddr, nil, 0, 0)
 }
 
 func DialWithDrop(raddr string, dropRate float64) (*UDPSession, error) {
-	s, err := DialWithOptions(raddr, nil, 0, 0, nil, DebugLevelLog)
+	s, err := DialWithDetailOptions(raddr, nil, 0, 0, nil, DebugLevelLog)
 	s.kcp.setDropRate(dropRate)
 	s.kcp.dropOpen()
 	return s, err
@@ -918,7 +934,11 @@ func DialWithDrop(raddr string, dropRate float64) (*UDPSession, error) {
 // 'dataShards', 'parityShards' specify how many parity packets will be generated following the data packets.
 //
 // Check https://github.com/klauspost/reedsolomon for details
-func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int, outputFile *string, logLevel int) (*UDPSession, error) {
+func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int) (*UDPSession, error) {
+	return DialWithDetailOptions(raddr, block, dataShards, parityShards, nil, InfoLevelLog)
+}
+
+func DialWithDetailOptions(raddr string, block BlockCrypt, dataShards, parityShards int, outputFile *string, logLevel int) (*UDPSession, error) {
 	err := LoggerInit(outputFile, logLevel)
 	if err != nil {
 		return nil, errors.WithStack(err)

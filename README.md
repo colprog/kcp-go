@@ -202,7 +202,7 @@ ok      github.com/xtaci/kcp-go/v5      64.151s
 New added after [commit: Add fail route detect and switch backup route](https://github.com/colprog/kcp-go/commit/8b3bd52d2ed9c10f4cce254817196350b9761b46) and [commit: Test cases for new controller logic](https://github.com/colprog/kcp-go/commit/f46cafaec7f0907b2fdeb368e750099b5211f4df)
 
 Main logic:
-1. server and client side can call `NewControllerConfig` which stared a grpc control service
+1. server and client side can call `NewControllerServer` which stared a grpc control service
   - Used to register a grpc service 
   - Interface for grpc service
     - `GetSessions`(both work on server and client): get the snmp infomation from current sessions.
