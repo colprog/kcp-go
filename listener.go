@@ -42,7 +42,7 @@ type (
 		dropKcpAckRate float64
 		dropOn         bool
 
-		contollerServer *SessionController
+		ContollerServer *SessionController
 	}
 )
 
@@ -125,8 +125,8 @@ func (l *Listener) packetInput(data []byte, addr net.Addr) {
 			if len(l.chAccepts) < cap(l.chAccepts) { // do not let the new sessions overwhelm accept queue
 				s := newUDPSession(conv, l.dataShards, l.parityShards, l, l.conn, false, addr, l.block)
 
-				if l.contollerServer != nil {
-					s.SetSessionController(l.contollerServer)
+				if l.ContollerServer != nil {
+					s.SetSessionController(l.ContollerServer)
 				}
 				s.kcpInput(data, isFromMeteredIP)
 				l.sessionLock.Lock()
@@ -152,11 +152,11 @@ func (l *Listener) notifyReadError(err error) {
 	})
 }
 
-func (l *Listener) NewControllerConfig(controllerConfig *SessionControllerConfig, startGRPC bool) (err error) {
+func (l *Listener) NewControllerServer(controllerConfig *SessionControllerConfig) (err error) {
 	if len(l.sessions) != 0 || len(l.sessionAlias) != 0 {
 		return errors.New("already exist session, should create controller server before session in.")
 	}
-	l.contollerServer = NewSessionController(controllerConfig, true, startGRPC)
+	l.ContollerServer = NewSessionController(controllerConfig, true)
 	return nil
 }
 
@@ -295,11 +295,11 @@ func (l *Listener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 // Listen listens for incoming KCP packets addressed to the local address laddr on the network "udp",
 func Listen(laddr string) (*Listener, error) {
-	return ListenWithOptions(laddr, nil, 0, 0, nil, InfoLevelLog)
+	return ListenWithDetailOptions(laddr, nil, 0, 0, nil, InfoLevelLog)
 }
 
 func ListenWithDrop(laddr string, dropRate float64) (*Listener, error) {
-	l, err := ListenWithOptions(laddr, nil, 0, 0, nil, DebugLevelLog)
+	l, err := ListenWithDetailOptions(laddr, nil, 0, 0, nil, DebugLevelLog)
 	if l == nil || err != nil {
 		return l, err
 	}
@@ -315,7 +315,11 @@ func ListenWithDrop(laddr string, dropRate float64) (*Listener, error) {
 // 'dataShards', 'parityShards' specify how many parity packets will be generated following the data packets.
 //
 // Check https://github.com/klauspost/reedsolomon for details
-func ListenWithOptions(laddr string, block BlockCrypt, dataShards, parityShards int, outputFile *string, logLevel int) (*Listener, error) {
+func ListenWithOptions(laddr string, block BlockCrypt, dataShards, parityShards int) (*Listener, error) {
+	return ListenWithDetailOptions(laddr, block, dataShards, parityShards, nil, InfoLevelLog)
+}
+
+func ListenWithDetailOptions(laddr string, block BlockCrypt, dataShards, parityShards int, outputFile *string, logLevel int) (*Listener, error) {
 	err := LoggerInit(outputFile, logLevel)
 	if err != nil {
 		return nil, errors.WithStack(err)

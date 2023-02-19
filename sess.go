@@ -81,11 +81,11 @@ func RunningAsOnlyMetered() {
 	LogInfo("current session running as SessionTypeOnlyMetered")
 }
 
-func SessionTypeDealImportPackage(shouldAddToMeteredQ bool) bool {
+func SessionTypeDealImportPackage(shouldAddToMeteredQ bool, existMeterRoute bool) bool {
 
 	if globalSessionType == SessionTypeNormal {
 		shouldAddToMeteredQ = false
-	} else if globalSessionType == SessionTypeOnlyMetered {
+	} else if globalSessionType == SessionTypeOnlyMetered && existMeterRoute {
 		shouldAddToMeteredQ = true
 	}
 
@@ -645,7 +645,7 @@ func (s *UDPSession) output(buf []byte, important bool) {
 	}
 
 	shouldAddToMeteredQ := important && s.meteredRemote != nil
-	shouldAddToMeteredQ = SessionTypeDealImportPackage(shouldAddToMeteredQ)
+	shouldAddToMeteredQ = SessionTypeDealImportPackage(shouldAddToMeteredQ, s.meteredRemote != nil)
 
 	// 4. TxQueue
 	var msg ipv4.Message
@@ -902,28 +902,26 @@ func (s *UDPSession) GetMeteredAddr() *net.UDPAddr {
 	return s.meteredRemote
 }
 
-func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) (err error) {
+func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) {
 
 	if s.meteredRemote == nil {
-		return errors.New("can not enable monitor, If there no metered remote set")
+		LogWarn("Without meter ip assigned.")
+		RunningAsNormal()
+	} else {
+		RunningAsExistMetered()
 	}
 
-	// FIXME: should it outside?
-	RunningAsExistMetered()
-
-	LogInfo("enabled monitor, monitor stared. interval=%d,detectRate=%f \n", interval, detectRate)
+	LogInfo("Enabled monitor, monitor stared. interval=%d,detectRate=%f. global session type is %d \n", interval, detectRate, globalSessionType)
 	go MonitorStart(s, interval, detectRate, s.controller)
-
-	return nil
 }
 
 // Dial connects to the remote address "raddr" on the network "udp" without encryption and FEC
 func Dial(raddr string) (*UDPSession, error) {
-	return DialWithOptions(raddr, nil, 0, 0, nil, InfoLevelLog)
+	return DialWithOptions(raddr, nil, 0, 0)
 }
 
 func DialWithDrop(raddr string, dropRate float64) (*UDPSession, error) {
-	s, err := DialWithOptions(raddr, nil, 0, 0, nil, DebugLevelLog)
+	s, err := DialWithDetailOptions(raddr, nil, 0, 0, nil, DebugLevelLog)
 	s.kcp.setDropRate(dropRate)
 	s.kcp.dropOpen()
 	return s, err
@@ -936,7 +934,11 @@ func DialWithDrop(raddr string, dropRate float64) (*UDPSession, error) {
 // 'dataShards', 'parityShards' specify how many parity packets will be generated following the data packets.
 //
 // Check https://github.com/klauspost/reedsolomon for details
-func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int, outputFile *string, logLevel int) (*UDPSession, error) {
+func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards int) (*UDPSession, error) {
+	return DialWithDetailOptions(raddr, block, dataShards, parityShards, nil, InfoLevelLog)
+}
+
+func DialWithDetailOptions(raddr string, block BlockCrypt, dataShards, parityShards int, outputFile *string, logLevel int) (*UDPSession, error) {
 	err := LoggerInit(outputFile, logLevel)
 	if err != nil {
 		return nil, errors.WithStack(err)

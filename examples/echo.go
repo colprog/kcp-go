@@ -18,7 +18,7 @@ func main() {
 
 	key := pbkdf2.Key([]byte("demo pass"), []byte("demo salt"), 1024, 32, sha1.New)
 	block, _ := kcp.NewAESBlockCrypt(key)
-	if listener, err := kcp.ListenWithOptions("127.0.0.1:12345", block, 10, 3, nil, kcp.DebugLevelLog); err == nil {
+	if listener, err := kcp.ListenWithDetailOptions("127.0.0.1:12345", block, 10, 3, nil, kcp.DebugLevelLog); err == nil {
 		// spin-up the client
 		go client()
 		for {
@@ -29,7 +29,7 @@ func main() {
 			go handleEcho(s)
 		}
 	} else {
-		kcp.LogFatalf("ListenWithOptions failed, error: %s", err)
+		kcp.LogFatalf("ListenWithDetailOptions failed, error: %s", err)
 	}
 }
 
@@ -59,7 +59,7 @@ func client() {
 	time.Sleep(time.Second)
 
 	// dial to the echo server
-	if sess, err := kcp.DialWithOptions("127.0.0.1:12345", block, 10, 3, nil, kcp.DebugLevelLog); err == nil {
+	if sess, err := kcp.DialWithDetailOptions("127.0.0.1:12345", block, 10, 3, nil, kcp.DebugLevelLog); err == nil {
 		for {
 			data := time.Now().String()
 			buf := make([]byte, len(data))
@@ -77,6 +77,6 @@ func client() {
 			time.Sleep(time.Second)
 		}
 	} else {
-		kcp.LogFatalf("DialWithOptions got error: %s", err)
+		kcp.LogFatalf("DialWithDetailOptions got error: %s", err)
 	}
 }

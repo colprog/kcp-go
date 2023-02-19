@@ -36,7 +36,7 @@ const (
 )
 
 // User should make sure meterIp is a loopback interface
-const meteredIp = "192.168.0.108"
+const meteredIp = "192.168.0.103"
 const meteredPort = localPort
 
 const (
@@ -125,20 +125,21 @@ func startServer2(t *testing.T, enableGRPC bool) {
 
 	listener.dropOff()
 
-	listener.NewControllerConfig(&SessionControllerConfig{
-		controllerIP:   controlIp,
-		controllerPort: controlPort,
-		allowDetect:    true,
+	listener.NewControllerServer(&SessionControllerConfig{
+		ControllerIP:   controlIp,
+		ControllerPort: controlPort,
+		StartGRPC:      enableGRPC,
 
-		dectedIP:   controlDetectIp,
-		dectedPort: controlDetectPort,
+		AllowDetect:  true,
+		DetectedIP:   controlDetectIp,
+		DetectedPort: controlDetectPort,
 
 		// no need set in server side
-		enableOriginRouteDetect:       false,
-		satisfyingDetectionRate:       0,
-		routeDetectTimes:              0,
-		detectPackageNumbersEachTimes: 0,
-	}, enableGRPC)
+		EnableOriginRouteDetect:       false,
+		SatisfyingDetectionRate:       0,
+		RouteDetectTimes:              0,
+		DetectPackageNumbersEachTimes: 0,
+	})
 	if t != nil {
 		go processRoutineServerSignal(listener)
 	} else {
@@ -198,26 +199,26 @@ func startClient(t *testing.T) {
 	cliSession.SetMeteredAddr(meteredIp, uint16(meteredPort), true)
 
 	cliConfig := &SessionControllerConfig{
-		controllerIP:   controlIp,
-		controllerPort: clientControlPort,
+		ControllerIP:   controlIp,
+		ControllerPort: clientControlPort,
+		StartGRPC:      true,
 
 		// no effect in client side
-		allowDetect: false,
+		AllowDetect: false,
 
-		dectedIP:   controlDetectIp,
-		dectedPort: controlDetectPort,
+		DetectedIP:   controlDetectIp,
+		DetectedPort: controlDetectPort,
 
-		enableOriginRouteDetect:       true,
-		satisfyingDetectionRate:       0.7,
-		routeDetectTimes:              10,
-		detectPackageNumbersEachTimes: 10,
+		EnableOriginRouteDetect:       true,
+		SatisfyingDetectionRate:       0.7,
+		RouteDetectTimes:              10,
+		DetectPackageNumbersEachTimes: 10,
 	}
-	cliSession.SetSessionController(NewSessionController(cliConfig, false, true))
+	cliSession.SetSessionController(NewSessionController(cliConfig, false))
 
 	go processClientSignal(cliSession)
 
-	err = cliSession.EnableMonitor(uint64(clientDetectInterval), clientDetectRate)
-	assert.NoError(t, err)
+	cliSession.EnableMonitor(uint64(clientDetectInterval), clientDetectRate)
 
 	for {
 		data := make([]byte, buffSize)
@@ -315,9 +316,9 @@ func TestServerControllerRPC(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotEqual(t, nil, registNewSessionReply)
 
-	assert.Equal(t, true, listener.contollerServer.newRegistered)
-	assert.Equal(t, clientRegisteBackupIp, listener.contollerServer.registerIP)
-	assert.Equal(t, clientRegisteBackupPort, listener.contollerServer.registerPort)
+	assert.Equal(t, true, listener.ContollerServer.newRegistered)
+	assert.Equal(t, clientRegisteBackupIp, listener.ContollerServer.registerIP)
+	assert.Equal(t, clientRegisteBackupPort, listener.ContollerServer.registerPort)
 
 	// 4. test RegsiterNewSession again
 	registNewSessionReply, err = KCPSessionCtlCli.RegsiterNewSession(context.Background(), &grpc_control.RegsiterNewSessionRequest{
@@ -328,8 +329,8 @@ func TestServerControllerRPC(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotEqual(t, nil, registNewSessionReply)
 
-	assert.Equal(t, true, listener.contollerServer.newRegistered)
-	assert.Equal(t, clientRegisteBackupPort+1, listener.contollerServer.registerPort)
+	assert.Equal(t, true, listener.ContollerServer.newRegistered)
+	assert.Equal(t, clientRegisteBackupPort+1, listener.ContollerServer.registerPort)
 
 	chanServer <- ServerCloseSignal
 }

@@ -19,43 +19,46 @@ const (
 
 type SessionControllerConfig struct {
 	// server side control config
-	controllerIP   string
-	controllerPort int
-	allowDetect    bool
+	StartGRPC      bool
+	ControllerIP   string
+	ControllerPort int
+
+	AllowDetect bool
 
 	// both side
 	// dectedIP and dectedPort:
 	// - for server side need allowDetect = true
 	// - for client side need enableOriginRouteDetect = true
-	dectedIP   string
-	dectedPort int
+	DetectedIP   string
+	DetectedPort int
 
 	// client side control config
-	enableOriginRouteDetect       bool
-	satisfyingDetectionRate       float32
-	routeDetectTimes              uint16
-	detectPackageNumbersEachTimes uint16
+	EnableOriginRouteDetect       bool
+	SatisfyingDetectionRate       float32
+	RouteDetectTimes              uint16
+	DetectPackageNumbersEachTimes uint16
 }
 
 func (c *SessionControllerConfig) SetControllerIP(ip string) {
-	c.controllerIP = ip
+	c.ControllerIP = ip
 }
 
 func (c *SessionControllerConfig) SetControllerPort(port int) {
-	c.controllerPort = port
+	c.ControllerPort = port
 }
 
 func NewDefaultConfig() *SessionControllerConfig {
 	c := new(SessionControllerConfig)
-	c.controllerIP = "0.0.0.0"
-	c.controllerPort = 10720
-	c.enableOriginRouteDetect = true
-	c.routeDetectTimes = 10
-	c.satisfyingDetectionRate = 0.7
-	c.detectPackageNumbersEachTimes = 10
-	c.allowDetect = true
-	c.dectedIP = "0.0.0.0"
-	c.dectedPort = 10721
+	c.StartGRPC = true
+	c.ControllerIP = "0.0.0.0"
+	c.ControllerPort = 10720
+	c.EnableOriginRouteDetect = true
+	c.RouteDetectTimes = 10
+	c.SatisfyingDetectionRate = 0.7
+	c.DetectPackageNumbersEachTimes = 10
+	c.AllowDetect = true
+	c.DetectedIP = "0.0.0.0"
+	c.DetectedPort = 10721
 	return c
 }
 
@@ -119,7 +122,7 @@ func (sessionController *SessionController) GetGlobalSessionTypeValue() int32 {
 	return atomic.LoadInt32(&globalSessionType)
 }
 
-func NewSessionController(config *SessionControllerConfig, serverSide bool, startGRPC bool) *SessionController {
+func NewSessionController(config *SessionControllerConfig, serverSide bool) *SessionController {
 	s := &SessionController{}
 
 	if config == nil {
@@ -129,11 +132,11 @@ func NewSessionController(config *SessionControllerConfig, serverSide bool, star
 	s.allowDectecting = true
 	s.allowSwitchBakcup = true
 
-	if startGRPC {
+	if config.StartGRPC {
 		sessionControllerServer := SessionControllerServer{}
 		sessionControllerServer.sessionController = s
 
-		rpcAddr := fmt.Sprintf("%s:%d", config.controllerIP, config.controllerPort)
+		rpcAddr := fmt.Sprintf("%s:%d", config.ControllerIP, config.ControllerPort)
 		li, err := net.Listen("tcp", rpcAddr)
 		if err != nil {
 			LogFatalf("failed to listen: %v", err)
@@ -149,9 +152,9 @@ func NewSessionController(config *SessionControllerConfig, serverSide bool, star
 		LogInfo("Controller GRPC is disabled")
 	}
 
-	if serverSide && config.allowDetect {
+	if serverSide && config.AllowDetect {
 		go func() {
-			detectAddrStr := fmt.Sprintf("%s:%d", config.dectedIP, config.dectedPort)
+			detectAddrStr := fmt.Sprintf("%s:%d", config.DetectedIP, config.DetectedPort)
 			detectAddr, err := net.ResolveUDPAddr("udp", detectAddrStr)
 			if err != nil {
 				LogFatalf("detect udp service fail to reslove addr: %s", detectAddrStr)
@@ -165,7 +168,7 @@ func NewSessionController(config *SessionControllerConfig, serverSide bool, star
 		}()
 	}
 
-	if !serverSide && config.allowDetect {
+	if !serverSide && config.AllowDetect {
 		LogWarn("no effect after client side allow detect")
 	}
 
@@ -352,22 +355,22 @@ func DetectOriginRouteProcess(interval uint64, controller *SessionController) (c
 	ikcp_encode32u(buf, DETECTION_MAGIC)
 	r := make([]byte, 1)
 
-	for i := uint16(0); i < controller.config.routeDetectTimes; i++ {
-		LogInfo("DetectOriginRoute start loop: %d/%d\n", i, controller.config.routeDetectTimes)
+	for i := uint16(0); i < controller.config.RouteDetectTimes; i++ {
+		LogInfo("DetectOriginRoute start loop: %d/%d\n", i, controller.config.RouteDetectTimes)
 		// reset as init
 		controller.dectectresultVeried = 0
 
 		srcAddr := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
 
-		detectAddrStr := fmt.Sprintf("%s:%d", controller.config.dectedIP, controller.config.dectedPort)
+		detectAddrStr := fmt.Sprintf("%s:%d", controller.config.DetectedIP, controller.config.DetectedPort)
 		detectAddr, err := net.ResolveUDPAddr("udp", detectAddrStr)
 		if err != nil {
-			LogError("dected addr err: %s\n", err)
+			LogError("Detected addr err: %s\n", err)
 			return
 		}
 		conn, err := net.DialUDP("udp", srcAddr, detectAddr)
 		if err != nil {
-			LogError("dected err: %s\n", err)
+			LogError("Detected err: %s\n", err)
 			time.Sleep(time.Duration(interval) * time.Second)
 			continue
 		}
@@ -382,7 +385,7 @@ func DetectOriginRouteProcess(interval uint64, controller *SessionController) (c
 
 		data := make([]byte, 1024)
 
-		for j := uint16(0); j < controller.config.detectPackageNumbersEachTimes; j++ {
+		for j := uint16(0); j < controller.config.DetectPackageNumbersEachTimes; j++ {
 			conn.Write(buf)
 			rev_size, err := conn.Read(data)
 			if rev_size == IKCP_ALIVE_DETECT_HEAD {
@@ -402,7 +405,7 @@ func DetectOriginRouteProcess(interval uint64, controller *SessionController) (c
 			}
 		}
 
-		if controller.dectectresultVeried/float32(controller.config.detectPackageNumbersEachTimes) > controller.config.satisfyingDetectionRate {
+		if controller.dectectresultVeried/float32(controller.config.DetectPackageNumbersEachTimes) > controller.config.SatisfyingDetectionRate {
 			changed = true
 			return
 		}
@@ -457,7 +460,7 @@ func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, control
 		if globalSessionType == SessionTypeOnlyMetered {
 			if controller != nil {
 				LogInfo("controller.newRegistered: %t, controller.allowSwitchBakcup: %t", controller.newRegistered, controller.allowSwitchBakcup)
-				if controller.config.enableOriginRouteDetect && atomic.LoadInt32(&controller.isDectecting) == 0 && controller.allowDectecting {
+				if controller.config.EnableOriginRouteDetect && atomic.LoadInt32(&controller.isDectecting) == 0 && controller.allowDectecting {
 					go DetectOriginRoute(interval, controller)
 				} else if controller.newRegistered && controller.allowSwitchBakcup {
 					err := backupRouteWakeUp(sess, controller)
