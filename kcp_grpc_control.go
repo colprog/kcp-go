@@ -355,6 +355,9 @@ func DetectOriginRouteProcess(interval uint64, controller *SessionController) (c
 	ikcp_encode32u(buf, DETECTION_MAGIC)
 	r := make([]byte, 1)
 
+	detectAddrStr := fmt.Sprintf("%s:%d", controller.config.DetectedIP, controller.config.DetectedPort)
+	LogInfo("DetectOriginRoute prepare loop, detect dest: %s \n", detectAddrStr)
+
 	for i := uint16(0); i < controller.config.RouteDetectTimes; i++ {
 		LogInfo("DetectOriginRoute start loop: %d/%d\n", i, controller.config.RouteDetectTimes)
 		// reset as init
@@ -362,7 +365,6 @@ func DetectOriginRouteProcess(interval uint64, controller *SessionController) (c
 
 		srcAddr := &net.UDPAddr{IP: net.IPv4zero, Port: 0}
 
-		detectAddrStr := fmt.Sprintf("%s:%d", controller.config.DetectedIP, controller.config.DetectedPort)
 		detectAddr, err := net.ResolveUDPAddr("udp", detectAddrStr)
 		if err != nil {
 			LogError("Detected addr err: %s\n", err)
