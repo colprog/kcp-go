@@ -102,8 +102,8 @@ func (sessionController *SessionController) AllowSwitchBakcup() {
 	sessionController.allowSwitchBakcup = true
 }
 
-func (sessionController *SessionController) SwitchGlobalSessionType(sessionType int32) error {
-	if atomic.LoadInt32(&sessionController.isDectecting) == -1 {
+func (sessionController *SessionController) SwitchGlobalSessionType(sessionType int32, flushDetecting bool) error {
+	if flushDetecting && atomic.LoadInt32(&sessionController.isDectecting) == -1 {
 		atomic.StoreInt32(&sessionController.isDectecting, 0)
 	}
 
@@ -362,6 +362,11 @@ func DetectOriginRouteProcess(interval uint64, controller *SessionController) (c
 	LogInfo("DetectOriginRoute prepare loop, detect dest: %s \n", detectAddrStr)
 
 	for i := uint16(0); i < controller.config.RouteDetectTimes; i++ {
+		if atomic.LoadInt32(&controller.isDectecting) != 1 {
+			LogInfo("DetectOriginRoute loop interrupt. \n")
+			return
+		}
+
 		LogInfo("DetectOriginRoute start loop: %d/%d\n", i, controller.config.RouteDetectTimes)
 		// reset as init
 		controller.dectectresultVeried = 0
@@ -441,18 +446,18 @@ func DetectOriginRoute(interval uint64, controller *SessionController) {
 
 }
 
-func backupRouteWakeUp(sess *UDPSession, controller *SessionController) error {
+func backupRouteWakeUp(sess *UDPSession, controller *SessionController) (string, error) {
 	if !sess.ownConn || sess.conn == nil {
-		return errors.New("invalid session.")
+		return "", errors.New("invalid session.")
 	}
 
 	raddr := fmt.Sprintf("%s:%d", controller.registerIP, controller.registerPort)
 	udpaddr, err := net.ResolveUDPAddr("udp", raddr)
 	if err != nil {
-		return err
+		return "", err
 	}
 	sess.remote = udpaddr
-	return nil
+	return raddr, nil
 }
 
 func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, controller *SessionController) {
@@ -475,16 +480,21 @@ func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, control
 			if controller != nil {
 				LogInfo("allow detect: %t, newRegistered route: %t, allowSwitchBakcup: %t, detecting status: %d", controller.config.EnableOriginRouteDetect,
 					controller.newRegistered, controller.allowSwitchBakcup, atomic.LoadInt32(&controller.isDectecting))
-				if controller.config.EnableOriginRouteDetect && atomic.LoadInt32(&controller.isDectecting) == 0 && controller.allowDectecting {
-					go DetectOriginRoute(interval, controller)
-				} else if controller.newRegistered && controller.allowSwitchBakcup {
-					err := backupRouteWakeUp(sess, controller)
+				if controller.newRegistered && controller.allowSwitchBakcup {
+					backupAddr, err := backupRouteWakeUp(sess, controller)
 					if err != nil {
 						LogError("backup route is invalid, error: %s", err)
 					} else {
+						LogInfo("backup route promoted, new route is: %s. The origin one will be ignored", backupAddr)
+						if atomic.LoadInt32(&controller.isDectecting) == 1 {
+							atomic.StoreInt32(&controller.isDectecting, -1)
+							LogInfo("origin route still detecting. already disabled.")
+						}
 						RunningAsExistMetered()
 					}
 					controller.resetRegisterServer()
+				} else if controller.config.EnableOriginRouteDetect && atomic.LoadInt32(&controller.isDectecting) == 0 && controller.allowDectecting {
+					go DetectOriginRoute(interval, controller)
 				} else if changed {
 					LogWarn("Controller Server stared, but not enable the route detece and not config the backup server.")
 				}

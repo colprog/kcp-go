@@ -64,6 +64,8 @@ const (
 
 var (
 	globalSessionType int32 = SessionTypeNormal
+	// no need use atomic value
+	GlobalMontorChannel bool = false
 )
 
 func RunningAsNormal() {
@@ -911,8 +913,13 @@ func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) {
 		RunningAsExistMetered()
 	}
 
-	LogInfo("Enabled monitor, monitor stared. interval=%d,detectRate=%f. global session type is %d \n", interval, detectRate, globalSessionType)
-	go MonitorStart(s, interval, detectRate, s.controller)
+	if GlobalMontorChannel {
+		LogWarn("Monitor already started.")
+	} else {
+		LogInfo("Enabled monitor, monitor stared. interval=%d,detectRate=%f. global session type is %d \n", interval, detectRate, globalSessionType)
+		GlobalMontorChannel = true
+		go MonitorStart(s, interval, detectRate, s.controller)
+	}
 }
 
 // Dial connects to the remote address "raddr" on the network "udp" without encryption and FEC
