@@ -36,7 +36,7 @@ const (
 )
 
 // User should make sure meterIp is a loopback interface
-const meteredIp = "192.168.0.103"
+const meteredIp = "192.168.0.102"
 const meteredPort = localPort
 
 const (
@@ -65,6 +65,7 @@ func init() {
 	LoggerDefault()
 
 	reexec.Register("serverProcess", serverProcess)
+	reexec.Register("serverProcess2", serverProcess2)
 	if reexec.Init() {
 		os.Exit(0)
 	}
@@ -73,6 +74,11 @@ func init() {
 func serverProcess() {
 	LogTest("serverProcess started")
 	startServer(nil)
+}
+
+func serverProcess2() {
+	LogTest("serverProcess2 started")
+	startServerWithoutDetect(nil)
 }
 
 func processRoutineServerSignal(l *Listener) {
@@ -105,10 +111,42 @@ func processServerSignal(l *Listener) {
 }
 
 func startServer(t *testing.T) {
-	startServer2(t, true)
+	startServerWithOptions(t, &SessionControllerConfig{
+		ControllerIP:   controlIp,
+		ControllerPort: controlPort,
+		StartGRPC:      true,
+
+		AllowDetect:  true,
+		DetectedIP:   controlDetectIp,
+		DetectedPort: controlDetectPort,
+
+		// no need set in server side
+		EnableOriginRouteDetect:       false,
+		SatisfyingDetectionRate:       0,
+		RouteDetectTimes:              0,
+		DetectPackageNumbersEachTimes: 0,
+	})
 }
 
-func startServer2(t *testing.T, enableGRPC bool) {
+func startServerWithoutDetect(t *testing.T) {
+	startServerWithOptions(t, &SessionControllerConfig{
+		ControllerIP:   controlIp,
+		ControllerPort: controlPort,
+		StartGRPC:      true,
+
+		AllowDetect:  false,
+		DetectedIP:   controlDetectIp,
+		DetectedPort: controlDetectPort,
+
+		// no need set in server side
+		EnableOriginRouteDetect:       false,
+		SatisfyingDetectionRate:       0,
+		RouteDetectTimes:              0,
+		DetectPackageNumbersEachTimes: 0,
+	})
+}
+
+func startServerWithOptions(t *testing.T, sessionControllerConfig *SessionControllerConfig) {
 	LogTest("Test server side started.")
 	var err error
 
@@ -125,21 +163,7 @@ func startServer2(t *testing.T, enableGRPC bool) {
 
 	listener.dropOff()
 
-	listener.NewControllerServer(&SessionControllerConfig{
-		ControllerIP:   controlIp,
-		ControllerPort: controlPort,
-		StartGRPC:      enableGRPC,
-
-		AllowDetect:  true,
-		DetectedIP:   controlDetectIp,
-		DetectedPort: controlDetectPort,
-
-		// no need set in server side
-		EnableOriginRouteDetect:       false,
-		SatisfyingDetectionRate:       0,
-		RouteDetectTimes:              0,
-		DetectPackageNumbersEachTimes: 0,
-	})
+	listener.NewControllerServer(sessionControllerConfig)
 	if t != nil {
 		go processRoutineServerSignal(listener)
 	} else {
@@ -231,7 +255,21 @@ func startClient(t *testing.T) {
 }
 
 func TestStartServerWithoutGRPC(t *testing.T) {
-	go startServer2(t, false)
+	go startServerWithOptions(t, &SessionControllerConfig{
+		ControllerIP:   controlIp,
+		ControllerPort: controlPort,
+		StartGRPC:      false,
+
+		AllowDetect:  true,
+		DetectedIP:   controlDetectIp,
+		DetectedPort: controlDetectPort,
+
+		// no need set in server side
+		EnableOriginRouteDetect:       false,
+		SatisfyingDetectionRate:       0,
+		RouteDetectTimes:              0,
+		DetectPackageNumbersEachTimes: 0,
+	})
 	time.Sleep(time.Second * 10)
 	assert.NotEqual(t, nil, listener)
 	assert.NotEqual(t, nil, listener.conn)
@@ -465,6 +503,41 @@ func TestServerRoutineAutoSwitch(t *testing.T) {
 
 	time.Sleep(time.Second * 12)
 	assert.Equal(t, SessionTypeExistMetered, globalSessionType)
+
+	// close server and client
+	err = cmd.Process.Signal(syscall.SIGTERM)
+	assert.NoError(t, err)
+
+	chanClient <- ClientCloseSignal
+}
+
+func TestServerRoutineAutoSwitch2(t *testing.T) {
+	cmd := reexec.Command("serverProcess2")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Start()
+	assert.NoError(t, err)
+	time.Sleep(time.Second * 5)
+
+	// 2. begin to drop all package which not from alter route
+	err = cmd.Process.Signal(syscall.SIGUSR1)
+	assert.NoError(t, err)
+
+	// 3. start client
+	go startClient(t)
+
+	time.Sleep(time.Second * 20)
+	// 4. check status should not changed
+	assert.Equal(t, SessionTypeOnlyMetered, globalSessionType)
+	assert.NotEqual(t, nil, cliSession)
+	assert.NotEqual(t, nil, cliSession.conn)
+
+	// 5. after all done, should not changed
+	time.Sleep(time.Second * 100)
+	assert.Equal(t, SessionTypeOnlyMetered, globalSessionType)
+	assert.Equal(t, SessionTypeOnlyMetered, globalSessionType)
+	assert.NotEqual(t, nil, cliSession.conn)
 
 	// close server and client
 	err = cmd.Process.Signal(syscall.SIGTERM)
