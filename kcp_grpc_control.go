@@ -462,14 +462,16 @@ func backupRouteWakeUp(sess *UDPSession, controller *SessionController) (string,
 
 func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, controller *SessionController) {
 	// Allow SessionTypeNormal in dectection
+	var meterDelayInit bool = true
 
 	sessMonitor := new(UDPSessionMonitor)
 
 	for {
 
-		// After MonitorStart, user may switch the session type by GRPC
-		// if globalSessionType == SessionTypeNormal
-		// Then just do nothing
+		if globalSessionType == SessionTypeNormal && meterDelayInit && sess.meteredRemote != nil {
+			RunningAsExistMetered()
+			meterDelayInit = false
+		}
 
 		changed := false
 		if globalSessionType == SessionTypeExistMetered {
