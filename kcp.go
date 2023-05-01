@@ -2,9 +2,12 @@ package kcp
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math/rand"
 	"sync/atomic"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 const (
@@ -43,7 +46,7 @@ var refTime time.Time = time.Now()
 func currentMs() uint32 { return uint32(time.Since(refTime) / time.Millisecond) }
 
 // output_callback is a prototype which ought capture conn and call conn.Write
-type output_callback func(buf []byte, size int, important bool)
+type output_callback func(buf []byte, size int, important bool, retryTimes uint32)
 
 /* encode 8 bits unsigned int */
 func ikcp_encode8u(p []byte, c byte) []byte {
@@ -728,6 +731,95 @@ func (kcp *KCP) wnd_unused() uint16 {
 	return 0
 }
 
+const DEFAULT_BUFFER_POOL_LEVEL = 3
+
+type KCPBufferPool struct {
+	Data [][]byte
+	Used [][]byte
+	// 0 - (level-1) is the normal buffer bucket
+	// normal buffer bucket used retry times to distinguish level
+	// The level bucket holding the ack buffer
+	// When init a buffer pool need level + 1 space
+	Level int
+}
+
+func NewKCPBufferPoolWithoutPreAlloc(level int) *KCPBufferPool {
+	return NewKCPBufferPool(level, 0)
+}
+
+func NewKCPBufferPool(level int, preAlloc uint16) *KCPBufferPool {
+	if level > 5 || level < 3 {
+		panic(errors.New("level should between [3,5]"))
+	}
+
+	bp := new(KCPBufferPool)
+	bp.Level = level
+
+	bp.Data = make([][]byte, level+1)
+	bp.Used = make([][]byte, level+1)
+	for i := range bp.Data {
+		bp.Data[i] = make([]byte, preAlloc)
+		bp.Used[i] = bp.Data[i][0:]
+	}
+
+	return bp
+}
+
+func (bp *KCPBufferPool) append(level int, data []byte, isAck bool) {
+	if level > bp.Level || (!isAck && level == bp.Level) {
+		panic(errors.New("invalid level"))
+	}
+	copy(bp.Used[level], data)
+	bp.Used[level] = bp.Used[level][len(data):]
+}
+
+func (bp *KCPBufferPool) Append(level int, data []byte) {
+	bp.append(level, data, false)
+}
+
+func (bp *KCPBufferPool) AppendAck(data []byte) {
+	bp.append(bp.Level, data, true)
+}
+
+func (bp *KCPBufferPool) brust(level int, size int, isAck bool) {
+	if level > bp.Level || (!isAck && level == bp.Level) {
+		panic(errors.New("invalid level"))
+	}
+
+	usedSize := len(bp.Used[level])
+
+	if usedSize < size {
+		panic(errors.New(fmt.Sprintf("invalid size %d which bigger than buffer pool used %d", size, usedSize)))
+	}
+
+	newSize := usedSize - size
+	bp.Used[level] = bp.Data[level][newSize:]
+}
+
+func (bp *KCPBufferPool) Brust(level int, size int) {
+	bp.brust(level, size, false)
+}
+
+func (bp *KCPBufferPool) BrustAck(size int) {
+	bp.brust(bp.Level, size, true)
+}
+
+func (bp *KCPBufferPool) brustAll(level int, isAck bool) {
+	if level > bp.Level || (!isAck && level == bp.Level) {
+		panic(errors.New("invalid level"))
+	}
+
+	bp.Used[level] = bp.Data[level][0:]
+}
+
+func (bp *KCPBufferPool) BrustAll(level int) {
+	bp.brustAll(level, false)
+}
+
+func (bp *KCPBufferPool) BrustAllAck() {
+	bp.brustAll(bp.Level, true)
+}
+
 // flush pending data
 func (kcp *KCP) flush(ackOnly bool) uint32 {
 	var seg segment
@@ -738,14 +830,43 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 	buffer := kcp.buffer
 	ptr := buffer[kcp.reserved:] // keep n bytes untouched
+
 	sendAllAcksMetered := kcp.send_all_acks_through_metered_ip
 	aggressiveness := kcp.metered_ip_aggressiveness
 
+	bp := NewKCPBufferPoolWithoutPreAlloc(DEFAULT_BUFFER_POOL_LEVEL)
+	bpi := NewKCPBufferPoolWithoutPreAlloc(DEFAULT_BUFFER_POOL_LEVEL)
+
+	getBPLevel := func(retryTimes uint32, isAck bool) int {
+		if retryTimes > uint32(bp.Level) {
+			return bp.Level
+		}
+		return int(retryTimes)
+	}
+
+	makeSpace2 := func(data []byte, important bool, retryTimes uint32, isAck bool) {
+		if isAck {
+			bpi.AppendAck(data)
+			return
+		}
+
+		if important {
+			bpi.Append(getBPLevel(retryTimes), data)
+		} else {
+			bp.Append(getBPLevel(retryTimes), data)
+		}
+	}
+
+	makeAckSpace := func(data []byte) {
+		// unused important and retryTimes when append ack packages
+		makeSpace2(data, true, 0, true)
+	}
+
 	// makeSpace makes room for writing
-	makeSpace := func(space int, important bool) bool {
+	makeSpace := func(space int, important bool, retryTimes uint32) bool {
 		size := len(buffer) - len(ptr)
 		if size+space > int(kcp.mtu) {
-			kcp.output(buffer, size, important)
+			kcp.output(buffer, size, important, retryTimes)
 			ptr = buffer[kcp.reserved:]
 			return false
 		}
@@ -753,10 +874,10 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	}
 
 	// flush bytes in buffer if there is any
-	flushBuffer := func(important bool) bool {
+	flushBuffer := func(important bool, retryTimes uint32) bool {
 		size := len(buffer) - len(ptr)
 		if size > kcp.reserved {
-			kcp.output(buffer, size, important)
+			kcp.output(buffer, size, important, retryTimes)
 			return false
 		}
 		return important
@@ -770,7 +891,8 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 		seg.cmd = IKCP_CMD_ACK
 		for i, ack := range kcp.acklist {
-			makeSpace(IKCP_OVERHEAD, important)
+			// TODO(jiaqizhi): double check retryTimes here
+			makeSpace(IKCP_OVERHEAD, important, 0)
 			// filter jitters caused by bufferbloat
 			if _itimediff(ack.sn, kcp.rcv_nxt) >= 0 || len(kcp.acklist)-1 == i {
 				seg.sn, seg.ts = ack.sn, ack.ts
@@ -783,7 +905,9 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 	if ackOnly { // flash remain ack segments
 		flushACK(sendAllAcksMetered)
-		flushBuffer(sendAllAcksMetered)
+
+		// TODO(jiaqizhi): double check retryTimes here
+		flushBuffer(sendAllAcksMetered, 0)
 		return kcp.interval
 	}
 
@@ -816,16 +940,18 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	// flush window probing commands
 	if (kcp.probe & IKCP_ASK_SEND) != 0 {
 		seg.cmd = IKCP_CMD_WASK
-		promoteToImportant = true
-		makeSpace(IKCP_OVERHEAD, promoteToImportant)
+		// Make default IKCP_CMD_WASK retry(fake) 1
+		// It will reduces packet loss
+		makeSpace(IKCP_OVERHEAD, true, 1)
 		ptr = seg.encode(ptr)
 	}
 
 	// flush window probing commands
 	if (kcp.probe & IKCP_ASK_TELL) != 0 {
 		seg.cmd = IKCP_CMD_WINS
-		promoteToImportant = true
-		makeSpace(IKCP_OVERHEAD, promoteToImportant)
+		// Make default IKCP_CMD_WINS retry(fake) 1
+		// It will reduces packet loss
+		makeSpace(IKCP_OVERHEAD, true, 1)
 		ptr = seg.encode(ptr)
 	}
 
@@ -926,15 +1052,17 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			segment.una = seg.una
 
 			willPromote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
+
 			// If globalSessionType is SessionTypeNormal
 			// Then current segment or ack won't be promote in `output`
 			if (willPromote || promoteToImportant) && globalSessionType != SessionTypeNormal {
 				segment.has_promote = true
 			}
+
 			flushACK(willPromote || promoteToImportant)
 
 			need := IKCP_OVERHEAD + len(segment.data)
-			promoteToImportant = makeSpace(need, promoteToImportant) || willPromote
+			promoteToImportant = makeSpace(need, promoteToImportant, segment.xmit) || willPromote
 			ptr = segment.encode(ptr)
 			copy(ptr, segment.data)
 			ptr = ptr[len(segment.data):]

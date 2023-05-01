@@ -236,15 +236,15 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	}
 
 	if l != nil {
-		sess.kcp = NewKCPWithDrop(conv, func(buf []byte, size int, important bool) {
+		sess.kcp = NewKCPWithDrop(conv, func(buf []byte, size int, important bool, retryTimes uint32) {
 			if size >= IKCP_OVERHEAD+sess.headerSize {
-				sess.output(buf[:size], important)
+				sess.output(buf[:size], important, retryTimes)
 			}
 		}, l.dropKcpAckRate, l.dropOn)
 	} else {
-		sess.kcp = NewKCP(conv, func(buf []byte, size int, important bool) {
+		sess.kcp = NewKCP(conv, func(buf []byte, size int, important bool, retryTimes uint32) {
 			if size >= IKCP_OVERHEAD+sess.headerSize {
-				sess.output(buf[:size], important)
+				sess.output(buf[:size], important, retryTimes)
 			}
 		})
 	}
@@ -623,7 +623,7 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 // 2. CRC32 integrity
 // 3. Encryption
 // 4. TxQueue
-func (s *UDPSession) output(buf []byte, important bool) {
+func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 	var ecc [][]byte
 
 	// 1. FEC encoding

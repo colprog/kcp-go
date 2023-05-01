@@ -23,3 +23,9 @@ _testmain.go
 *.exe
 *.test
 *.prof
+
+# vs-code
+**/.vscode
+# OSX
+**/.DS_Store 
+Thumbs.db
