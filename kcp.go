@@ -734,90 +734,64 @@ func (kcp *KCP) wnd_unused() uint16 {
 const DEFAULT_BUFFER_POOL_LEVEL = 3
 
 type KCPBufferPool struct {
-	Data [][]byte
+	// Data [][]byte
 	Used [][]byte
 	// 0 - (level-1) is the normal buffer bucket
 	// normal buffer bucket used retry times to distinguish level
 	// The level bucket holding the ack buffer
 	// When init a buffer pool need level + 1 space
-	Level int
+	Level    int
+	Reserved int
 }
 
-func NewKCPBufferPoolWithoutPreAlloc(level int) *KCPBufferPool {
-	return NewKCPBufferPool(level, 0)
-}
-
-func NewKCPBufferPool(level int, preAlloc uint16) *KCPBufferPool {
+func NewKCPBufferPool(level int, reserved int) *KCPBufferPool {
 	if level > 5 || level < 3 {
 		panic(errors.New("level should between [3,5]"))
 	}
 
 	bp := new(KCPBufferPool)
 	bp.Level = level
+	bp.Reserved = reserved
 
-	bp.Data = make([][]byte, level+1)
+	// bp.Data = make([][]byte, level+1)
 	bp.Used = make([][]byte, level+1)
-	for i := range bp.Data {
-		bp.Data[i] = make([]byte, preAlloc)
-		bp.Used[i] = bp.Data[i][0:]
+	for i := range bp.Used {
+		bp.Used[i] = make([]byte, reserved, 1024)
 	}
 
 	return bp
 }
 
-func (bp *KCPBufferPool) append(level int, data []byte, isAck bool) {
+func (bp *KCPBufferPool) getBuffer(level int, isAck bool) *[]byte {
 	if level > bp.Level || (!isAck && level == bp.Level) {
-		panic(errors.New("invalid level"))
+		panic(errors.New(fmt.Sprintf("invalid level %d, bp.Level is %d", level, bp.Level)))
 	}
-	copy(bp.Used[level], data)
-	bp.Used[level] = bp.Used[level][len(data):]
+
+	return &bp.Used[level]
 }
 
-func (bp *KCPBufferPool) Append(level int, data []byte) {
-	bp.append(level, data, false)
+func (bp *KCPBufferPool) GetBuffer(level int) *[]byte {
+	return bp.getBuffer(level, false)
 }
 
-func (bp *KCPBufferPool) AppendAck(data []byte) {
-	bp.append(bp.Level, data, true)
+func (bp *KCPBufferPool) GetAckBuffer() *[]byte {
+	return bp.getBuffer(bp.Level, true)
 }
 
-func (bp *KCPBufferPool) brust(level int, size int, isAck bool) {
+func (bp *KCPBufferPool) getBufferSize(level int, isAck bool) int {
 	if level > bp.Level || (!isAck && level == bp.Level) {
-		panic(errors.New("invalid level"))
+		panic(errors.New(fmt.Sprintf("invalid level %d, bp.Level is %d", level, bp.Level)))
 	}
-
-	usedSize := len(bp.Used[level])
-
-	if usedSize < size {
-		panic(errors.New(fmt.Sprintf("invalid size %d which bigger than buffer pool used %d", size, usedSize)))
-	}
-
-	newSize := usedSize - size
-	bp.Used[level] = bp.Data[level][newSize:]
+	// fmt.Printf("len(bp.Used[level]): %d len(bp.Data[level]): %d\n", len(bp.Used[level]), len(bp.Data[level]))
+	return len(bp.Used[level]) - bp.Reserved
 }
 
-func (bp *KCPBufferPool) Brust(level int, size int) {
-	bp.brust(level, size, false)
+func (bp *KCPBufferPool) GetBufferSize(level int) int {
+	return bp.getBufferSize(level, false)
 }
 
-func (bp *KCPBufferPool) BrustAck(size int) {
-	bp.brust(bp.Level, size, true)
-}
-
-func (bp *KCPBufferPool) brustAll(level int, isAck bool) {
-	if level > bp.Level || (!isAck && level == bp.Level) {
-		panic(errors.New("invalid level"))
-	}
-
-	bp.Used[level] = bp.Data[level][0:]
-}
-
-func (bp *KCPBufferPool) BrustAll(level int) {
-	bp.brustAll(level, false)
-}
-
-func (bp *KCPBufferPool) BrustAllAck() {
-	bp.brustAll(bp.Level, true)
+func (bp *KCPBufferPool) GetAckBufferSize() int {
+	return bp.getBufferSize(bp.Level, true)
 }
 
 // flush pending data
@@ -828,90 +802,97 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	seg.wnd = kcp.wnd_unused()
 	seg.una = kcp.rcv_nxt
 
-	buffer := kcp.buffer
-	ptr := buffer[kcp.reserved:] // keep n bytes untouched
+	// buffer := kcp.buffer
+	// ptr := buffer[kcp.reserved:] // keep n bytes untouched
 
-	sendAllAcksMetered := kcp.send_all_acks_through_metered_ip
+	// sendAllAcksMetered := kcp.send_all_acks_through_metered_ip
 	aggressiveness := kcp.metered_ip_aggressiveness
 
-	bp := NewKCPBufferPoolWithoutPreAlloc(DEFAULT_BUFFER_POOL_LEVEL)
-	bpi := NewKCPBufferPoolWithoutPreAlloc(DEFAULT_BUFFER_POOL_LEVEL)
+	bp := NewKCPBufferPool(DEFAULT_BUFFER_POOL_LEVEL, kcp.reserved)
+	bpi := NewKCPBufferPool(DEFAULT_BUFFER_POOL_LEVEL, kcp.reserved)
 
-	getBPLevel := func(retryTimes uint32, isAck bool) int {
-		if retryTimes > uint32(bp.Level) {
-			return bp.Level
+	getBPLevel := func(retryTimes uint32) int {
+		if retryTimes >= uint32(bp.Level) {
+			return bp.Level - 1
 		}
 		return int(retryTimes)
 	}
 
-	makeSpace2 := func(data []byte, important bool, retryTimes uint32, isAck bool) {
+	encodeSegInfo := func(seg *segment, isAck bool) {
+		var ptr_24 = make([]byte, IKCP_OVERHEAD)
+
 		if isAck {
-			bpi.AppendAck(data)
-			return
-		}
-
-		if important {
-			bpi.Append(getBPLevel(retryTimes), data)
+			bpi.Used[bp.Level] = append(bpi.Used[bp.Level], ptr_24...)
+			seg.encode(bpi.Used[bp.Level])
 		} else {
-			bp.Append(getBPLevel(retryTimes), data)
+			bp.Used[0] = append(bp.Used[0], ptr_24...)
+			seg.encode(bp.Used[0])
+		}
+
+		// _ = seg.encode(ptr)
+		// if isAck {
+		// 	bpi.BrustAck(len(new_ptr) - len(ptr))
+		// } else {
+		// 	bpi.Brust(0, len(new_ptr)-len(ptr))
+		// }
+	}
+
+	fullSegInfo := func(seg *segment, important bool, retryTimes uint32) {
+		encodeSegInfo(seg, false)
+
+		level := getBPLevel(retryTimes)
+		if important {
+			bpi.Used[level] = append(bpi.Used[level], seg.data...)
+		} else {
+			bp.Used[level] = append(bp.Used[level], seg.data...)
 		}
 	}
 
-	makeAckSpace := func(data []byte) {
-		// unused important and retryTimes when append ack packages
-		makeSpace2(data, true, 0, true)
-	}
-
-	// makeSpace makes room for writing
-	makeSpace := func(space int, important bool, retryTimes uint32) bool {
-		size := len(buffer) - len(ptr)
-		if size+space > int(kcp.mtu) {
-			kcp.output(buffer, size, important, retryTimes)
-			ptr = buffer[kcp.reserved:]
-			return false
-		}
-		return important
-	}
-
-	// flush bytes in buffer if there is any
-	flushBuffer := func(important bool, retryTimes uint32) bool {
-		size := len(buffer) - len(ptr)
-		if size > kcp.reserved {
-			kcp.output(buffer, size, important, retryTimes)
-			return false
-		}
-		return important
-	}
-
-	// flush acknowledges
-	flushACK := func(important bool) bool {
+	fullACK := func() {
 		if len(kcp.acklist) == 0 {
-			return false
+			return
 		}
 
 		seg.cmd = IKCP_CMD_ACK
 		for i, ack := range kcp.acklist {
-			// TODO(jiaqizhi): double check retryTimes here
-			makeSpace(IKCP_OVERHEAD, important, 0)
 			// filter jitters caused by bufferbloat
 			if _itimediff(ack.sn, kcp.rcv_nxt) >= 0 || len(kcp.acklist)-1 == i {
 				seg.sn, seg.ts = ack.sn, ack.ts
-				ptr = seg.encode(ptr)
+				encodeSegInfo(&seg, true)
 			}
 		}
 		kcp.acklist = kcp.acklist[0:0]
-		return true
 	}
 
-	if ackOnly { // flash remain ack segments
-		flushACK(sendAllAcksMetered)
+	flushBuffer := func() {
+		// contain ack
+		for i := bpi.Level; i >= 0; i-- {
+			var size int
+			if i == bpi.Level {
+				size = bpi.GetAckBufferSize()
+			} else {
+				size = bpi.GetBufferSize(i)
+			}
 
-		// TODO(jiaqizhi): double check retryTimes here
-		flushBuffer(sendAllAcksMetered, 0)
+			if size != 0 {
+				kcp.output(bpi.Used[i], len(bpi.Used[i]), true, uint32(i))
+			}
+		}
+
+		for i := bp.Level - 1; i >= 0; i-- {
+			size := bp.GetBufferSize(i)
+			if size != 0 {
+				kcp.output(bp.Used[i], len(bp.Used[i]), true, uint32(i))
+			}
+		}
+	}
+
+	fullACK()
+
+	if ackOnly { // flush remain ack segments
+		flushBuffer()
 		return kcp.interval
 	}
-
-	promoteToImportant := sendAllAcksMetered && flushACK(true)
 
 	// probe window size (if remote window size equals zero)
 	if kcp.rmt_wnd == 0 {
@@ -942,8 +923,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		seg.cmd = IKCP_CMD_WASK
 		// Make default IKCP_CMD_WASK retry(fake) 1
 		// It will reduces packet loss
-		makeSpace(IKCP_OVERHEAD, true, 1)
-		ptr = seg.encode(ptr)
+		encodeSegInfo(&seg, false)
 	}
 
 	// flush window probing commands
@@ -951,8 +931,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		seg.cmd = IKCP_CMD_WINS
 		// Make default IKCP_CMD_WINS retry(fake) 1
 		// It will reduces packet loss
-		makeSpace(IKCP_OVERHEAD, true, 1)
-		ptr = seg.encode(ptr)
+		encodeSegInfo(&seg, false)
 	}
 
 	kcp.probe = 0
@@ -977,14 +956,13 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		kcp.snd_nxt++
 		newSegsCount++
 	}
+
 	if newSegsCount > 0 {
 		kcp.snd_queue = kcp.remove_front(kcp.snd_queue, newSegsCount)
 	} else {
 		// 滑动窗口若无进展（窗口满或无新数据），提高发送优先级，希望能推动窗口进展
-		if aggressiveness >= 1 {
-			promoteToImportant = true
-		} else {
-			promoteToImportant = flushACK(true) || promoteToImportant
+		if aggressiveness < 1 {
+			fullACK()
 		}
 	}
 
@@ -1051,21 +1029,18 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			segment.wnd = seg.wnd
 			segment.una = seg.una
 
-			willPromote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
+			promote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
 
 			// If globalSessionType is SessionTypeNormal
 			// Then current segment or ack won't be promote in `output`
-			if (willPromote || promoteToImportant) && globalSessionType != SessionTypeNormal {
+			if promote && globalSessionType != SessionTypeNormal {
 				segment.has_promote = true
 			}
 
-			flushACK(willPromote || promoteToImportant)
+			// TBD: should allow ack not use meter ?
+			fullACK()
 
-			need := IKCP_OVERHEAD + len(segment.data)
-			promoteToImportant = makeSpace(need, promoteToImportant, segment.xmit) || willPromote
-			ptr = segment.encode(ptr)
-			copy(ptr, segment.data)
-			ptr = ptr[len(segment.data):]
+			fullSegInfo(segment, promote, segment.xmit)
 
 			if segment.xmit >= kcp.dead_link {
 				kcp.state = 0xFFFFFFFF
@@ -1078,9 +1053,8 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		}
 	}
 
-	flushACK(promoteToImportant)
-	// flash remain segments
-	flushBuffer(promoteToImportant)
+	fullACK()
+	flushBuffer()
 
 	// counter updates
 	sum := lostSegs
