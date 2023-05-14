@@ -659,8 +659,7 @@ func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
 
-		// TBD: spec ack and non-ack
-		// dSegmentACKed will mess up
+		// If ack here, retryTimes will always be 0
 		for i := 0; uint32(i) < (retryTimes + 1); i++ {
 			s.txqueue = append(s.txqueue, msg)
 		}

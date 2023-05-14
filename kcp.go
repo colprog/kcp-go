@@ -887,7 +887,12 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 			if size != 0 {
 				for _, mtu_buffer := range bpi.Used[i] {
-					kcp.output(mtu_buffer, len(mtu_buffer), true, uint32(i))
+					if i == bpi.Level {
+						kcp.output(mtu_buffer, len(mtu_buffer), true, 0)
+					} else {
+						kcp.output(mtu_buffer, len(mtu_buffer), true, uint32(i))
+					}
+
 				}
 				bpi.Used[i] = nil
 			}
