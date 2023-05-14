@@ -752,6 +752,10 @@ func NewKCPBufferPool(level int, reserved int) *KCPBufferPool {
 	bp.Level = level
 	bp.Reserved = reserved
 
+	if bp.Reserved != 0 {
+		panic(errors.New("unsupport kcp.reserved yes"))
+	}
+
 	bp.Used = make([][][]byte, level+1)
 	for i := range bp.Used {
 		bp.Used[i] = make([][]byte, reserved, 1024)
@@ -765,7 +769,7 @@ func (bp *KCPBufferPool) getBufferSize(level int, isAck bool) int {
 		panic(errors.New(fmt.Sprintf("invalid level %d, bp.Level is %d", level, bp.Level)))
 	}
 
-	return len(bp.Used[level]) - bp.Reserved
+	return len(bp.Used[level])
 }
 
 func (bp *KCPBufferPool) GetBufferSize(level int) int {
@@ -779,7 +783,7 @@ func (bp *KCPBufferPool) GetAckBufferSize() int {
 func (bp *KCPBufferPool) EncodeAckSegInfo(seg *segment, mtu uint32) {
 	var ack_buffer = make([]byte, IKCP_OVERHEAD)
 	var ack_flat_size = bp.GetAckBufferSize()
-
+	var used_size = 0
 	if ack_flat_size == 0 {
 		bp.Used[bp.Level] = append(bp.Used[bp.Level], ack_buffer)
 		ack_flat_size += 1
@@ -787,10 +791,11 @@ func (bp *KCPBufferPool) EncodeAckSegInfo(seg *segment, mtu uint32) {
 		bp.Used[bp.Level] = append(bp.Used[bp.Level], ack_buffer)
 		ack_flat_size += 1
 	} else {
+		used_size = len(bp.Used[bp.Level][ack_flat_size-1])
 		bp.Used[bp.Level][ack_flat_size-1] = append(bp.Used[bp.Level][ack_flat_size-1], ack_buffer...)
 	}
 
-	seg.encode(bp.Used[bp.Level][ack_flat_size-1])
+	seg.encode(bp.Used[bp.Level][ack_flat_size-1][used_size:])
 }
 
 func (bp *KCPBufferPool) EncodeSegInfo(seg *segment, mtu uint32, level int) {
@@ -799,18 +804,19 @@ func (bp *KCPBufferPool) EncodeSegInfo(seg *segment, mtu uint32, level int) {
 	var buffer_flat_size = bp.GetBufferSize(level)
 
 	if buffer_flat_size == 0 {
-		bp.Used[level] = append(bp.Used[level], make([][]byte, mtu)...)
+		bp.Used[level] = make([][]byte, 1)
 		bp.Used[level][0] = append(bp.Used[level][0], seg_header_buffer...)
 		seg.encode(bp.Used[level][0])
 		bp.Used[level][0] = append(bp.Used[level][0], seg.data...)
 	} else if uint32(len(bp.Used[level][buffer_flat_size-1])+need) > mtu {
-		bp.Used[level] = append(bp.Used[level], make([][]byte, mtu)...)
+		bp.Used[level] = append(bp.Used[level], make([][]byte, 1)...)
 		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg_header_buffer...)
 		seg.encode(bp.Used[level][buffer_flat_size])
 		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg.data...)
 	} else {
+		used_size := len(bp.Used[level][buffer_flat_size-1])
 		bp.Used[level][buffer_flat_size-1] = append(bp.Used[level][buffer_flat_size-1], seg_header_buffer...)
-		seg.encode(bp.Used[level][buffer_flat_size-1])
+		seg.encode(bp.Used[level][buffer_flat_size-1][used_size:])
 		bp.Used[level][buffer_flat_size-1] = append(bp.Used[level][buffer_flat_size-1], seg.data...)
 	}
 }
@@ -883,7 +889,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 				for _, mtu_buffer := range bpi.Used[i] {
 					kcp.output(mtu_buffer, len(mtu_buffer), true, uint32(i))
 				}
-				bpi.Used[i] = bpi.Used[i][:0]
+				bpi.Used[i] = nil
 			}
 		}
 
@@ -895,7 +901,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 					kcp.output(mtu_buffer, len(mtu_buffer), false, uint32(i))
 				}
 
-				bp.Used[i] = bp.Used[i][:0]
+				bp.Used[i] = nil
 			}
 		}
 	}
@@ -1053,7 +1059,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			// TBD: should allow ack not use meter ?
 			fullACK()
 
-			encodeSegInfo(segment, promote, segment.xmit)
+			encodeSegInfo(segment, promote, segment.xmit-1)
 			if segment.sn == 0 {
 				flushBuffer()
 			}
