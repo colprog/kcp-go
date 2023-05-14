@@ -658,7 +658,12 @@ func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
-		s.txqueue = append(s.txqueue, msg)
+
+		// TBD: spec ack and non-ack
+		// dSegmentACKed will mess up
+		for i := 0; uint32(i) < (retryTimes + 1); i++ {
+			s.txqueue = append(s.txqueue, msg)
+		}
 		atomic.AddUint64(&DefaultSnmp.BytesSentFromNoMeteredRaw, uint64(length))
 		if shouldAddToMeteredQ {
 			msg.Addr = s.meteredRemote
