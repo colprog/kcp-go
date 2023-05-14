@@ -776,6 +776,45 @@ func (bp *KCPBufferPool) GetAckBufferSize() int {
 	return bp.getBufferSize(bp.Level, true)
 }
 
+func (bp *KCPBufferPool) EncodeAckSegInfo(seg *segment, mtu uint32) {
+	var ack_buffer = make([]byte, IKCP_OVERHEAD)
+	var ack_flat_size = bp.GetAckBufferSize()
+
+	if ack_flat_size == 0 {
+		bp.Used[bp.Level] = append(bp.Used[bp.Level], ack_buffer)
+		ack_flat_size += 1
+	} else if uint32(len(bp.Used[bp.Level][ack_flat_size-1])+IKCP_OVERHEAD) > mtu {
+		bp.Used[bp.Level] = append(bp.Used[bp.Level], ack_buffer)
+		ack_flat_size += 1
+	} else {
+		bp.Used[bp.Level][ack_flat_size-1] = append(bp.Used[bp.Level][ack_flat_size-1], ack_buffer...)
+	}
+
+	seg.encode(bp.Used[bp.Level][ack_flat_size-1])
+}
+
+func (bp *KCPBufferPool) EncodeSegInfo(seg *segment, mtu uint32, level int) {
+	var need = len(seg.data) + IKCP_OVERHEAD
+	var seg_header_buffer = make([]byte, IKCP_OVERHEAD)
+	var buffer_flat_size = bp.GetBufferSize(level)
+
+	if buffer_flat_size == 0 {
+		bp.Used[level] = append(bp.Used[level], make([][]byte, mtu)...)
+		bp.Used[level][0] = append(bp.Used[level][0], seg_header_buffer...)
+		seg.encode(bp.Used[level][0])
+		bp.Used[level][0] = append(bp.Used[level][0], seg.data...)
+	} else if uint32(len(bp.Used[level][buffer_flat_size-1])+need) > mtu {
+		bp.Used[level] = append(bp.Used[level], make([][]byte, mtu)...)
+		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg_header_buffer...)
+		seg.encode(bp.Used[level][buffer_flat_size])
+		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg.data...)
+	} else {
+		bp.Used[level][buffer_flat_size-1] = append(bp.Used[level][buffer_flat_size-1], seg_header_buffer...)
+		seg.encode(bp.Used[level][buffer_flat_size-1])
+		bp.Used[level][buffer_flat_size-1] = append(bp.Used[level][buffer_flat_size-1], seg.data...)
+	}
+}
+
 // flush pending data
 func (kcp *KCP) flush(ackOnly bool) uint32 {
 	var seg segment
@@ -801,52 +840,16 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	}
 
 	encodeAckSegInfo := func(seg *segment) {
-
-		var ack_buffer = make([]byte, IKCP_OVERHEAD)
-		var ack_flat_size = bpi.GetAckBufferSize()
-
-		if ack_flat_size == 0 {
-			bpi.Used[bp.Level] = append(bpi.Used[bp.Level], ack_buffer)
-			ack_flat_size += 1
-		} else if uint32(len(bpi.Used[bp.Level][ack_flat_size-1])+IKCP_OVERHEAD) > kcp.mtu {
-			bpi.Used[bp.Level] = append(bpi.Used[bp.Level], ack_buffer)
-			ack_flat_size += 1
-		} else {
-			bpi.Used[bp.Level][ack_flat_size-1] = append(bpi.Used[bp.Level][ack_flat_size-1], ack_buffer...)
-		}
-
-		seg.encode(bpi.Used[bp.Level][ack_flat_size-1])
+		bpi.EncodeAckSegInfo(seg, kcp.mtu)
 	}
 
 	encodeSegInfo := func(seg *segment, important bool, retryTimes uint32) {
-		encodeSegInfoInternal := func(bufferpool *KCPBufferPool, seg *segment, important bool, retryTimes uint32) {
-			level := getBPLevel(retryTimes)
-
-			var need = len(seg.data) + IKCP_OVERHEAD
-			var seg_header_buffer = make([]byte, IKCP_OVERHEAD)
-			var buffer_flat_size = bufferpool.GetBufferSize(level)
-
-			if buffer_flat_size == 0 {
-				bufferpool.Used[level] = append(bufferpool.Used[level], make([][]byte, kcp.mtu)...)
-				bufferpool.Used[level][0] = append(bufferpool.Used[level][0], seg_header_buffer...)
-				seg.encode(bufferpool.Used[level][0])
-				bufferpool.Used[level][0] = append(bufferpool.Used[level][0], seg.data...)
-			} else if uint32(len(bufferpool.Used[level][buffer_flat_size-1])+need) > kcp.mtu {
-				bufferpool.Used[level] = append(bufferpool.Used[level], make([][]byte, kcp.mtu)...)
-				bufferpool.Used[level][buffer_flat_size] = append(bufferpool.Used[level][buffer_flat_size], seg_header_buffer...)
-				seg.encode(bufferpool.Used[level][buffer_flat_size])
-				bufferpool.Used[level][buffer_flat_size] = append(bufferpool.Used[level][buffer_flat_size], seg.data...)
-			} else {
-				bufferpool.Used[level][buffer_flat_size-1] = append(bufferpool.Used[level][buffer_flat_size-1], seg_header_buffer...)
-				seg.encode(bufferpool.Used[level][buffer_flat_size-1])
-				bufferpool.Used[level][buffer_flat_size-1] = append(bufferpool.Used[level][buffer_flat_size-1], seg.data...)
-			}
-		}
+		level := getBPLevel(retryTimes)
 
 		if important {
-			encodeSegInfoInternal(bpi, seg, important, retryTimes)
+			bpi.EncodeSegInfo(seg, kcp.mtu, level)
 		} else {
-			encodeSegInfoInternal(bp, seg, important, retryTimes)
+			bp.EncodeSegInfo(seg, kcp.mtu, level)
 		}
 	}
 
