@@ -626,6 +626,8 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 	var ecc [][]byte
 
+	// Temporarily skip the retry logic, and the receiving end also needs to be modified accordingly, as sticking packets can lead to poor parsing of the header
+	retryTimes = 0
 	// 1. FEC encoding
 	if s.fecEncoder != nil {
 		ecc = s.fecEncoder.encode(buf)
