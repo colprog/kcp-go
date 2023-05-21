@@ -23,16 +23,18 @@ type (
 		StatisticalInterval int     `json:"StatisticalInterval"`
 		MonitorInterval     int     `json:"MonitorInterval"`
 		DetectRate          float64 `json:"DetectRate"`
+		LoopTimes           int     `json:"LoopTimes"`
 		EnableVerifyMode    bool    `json:"EnableVerifyMode"`
 	}
 
 	BenchSerOps struct {
-		ListenSlowPort      int     `json:"ListenSlowPort"`
-		DropRate            float64 `json:"DropRate"`
-		MaxBufferSize       int     `json:"MaxBufferSize"`
-		MeteredAddress      string  `json:"MeteredAddress"`
-		StatisticalInterval int     `json:"StatisticalInterval"`
-		EnableVerifyMode    bool    `json:"EnableVerifyMode"`
+		ListenSlowPort        int     `json:"ListenSlowPort"`
+		DropRate              float64 `json:"DropRate"`
+		MaxBufferSize         int     `json:"MaxBufferSize"`
+		MeteredAddress        string  `json:"MeteredAddress"`
+		StatisticalInterval   int     `json:"StatisticalInterval"`
+		EnableVerifyMode      bool    `json:"EnableVerifyMode"`
+		ExpectVerifyLoopTimes int     `json:"ExpectVerifyLoopTimes"`
 	}
 
 	BenchOps struct {
@@ -52,8 +54,9 @@ const (
 )
 
 const (
-	DefaultControlPort      int = 10721
-	DefaultVerifyDataLength int = 1000
+	DefaultControlPort       int = 10721
+	DefaultVerifyDataLength  int = 1000
+	DefaultVerifyDataNumbers int = 1000
 )
 
 func main() {
@@ -122,6 +125,11 @@ func main() {
 						Usage: "after enabled verify, some of args will been ignored",
 						Value: false,
 					},
+					&cli.IntFlag{
+						Name:  "expect-verify-loop-times",
+						Usage: "current flags should same as client loop times, make sure client won't send any package bigger than mtu(1500) ",
+						Value: 0,
+					},
 				},
 				Action: func(c *cli.Context) error {
 					runMode = ServerMode
@@ -131,6 +139,8 @@ func main() {
 					benchSerOps.MeteredAddress = c.String("metered-address")
 					benchSerOps.StatisticalInterval = c.Int("statistical-interval")
 					benchSerOps.EnableVerifyMode = c.Bool("enable-verify-mode")
+					benchSerOps.ExpectVerifyLoopTimes = c.Int("expect-verify-loop-times")
+
 					if len(benchSerOps.MeteredAddress) == 0 {
 						return errors.New("invalid MeteredAddress")
 					}
@@ -218,6 +228,11 @@ func main() {
 						Usage: "After enabled monitor, the rate will effect mode change",
 						Value: 0.9,
 					},
+					&cli.IntFlag{
+						Name:  "loop-times",
+						Usage: "the sender loop times.",
+						Value: 0,
+					},
 					&cli.BoolFlag{
 						Name:  "enable-verify-mode",
 						Usage: "after enabled verify, some of args will been ignored",
@@ -235,7 +250,9 @@ func main() {
 					benchCliOps.StatisticalInterval = c.Int("statistical-interval")
 					benchCliOps.MonitorInterval = c.Int("monitor-interval")
 					benchCliOps.DetectRate = c.Float64("detect-rate")
+					benchCliOps.LoopTimes = c.Int("loop-times")
 					benchCliOps.EnableVerifyMode = c.Bool("enable-verify-mode")
+
 					if len(benchCliOps.RemoteMeterAddr) == 0 {
 						return errors.New("invalid RemoteMeterAddr")
 					}
@@ -411,19 +428,21 @@ func startServer(args *BenchSerOps) error {
 		if err != nil {
 			return err
 		}
-		go handleMessage(s, args.MaxBufferSize, args.EnableVerifyMode)
+		go handleMessage(s, args)
 	}
 
 	return nil
 }
 
-func handleMessage(conn *kcp.UDPSession, maxSize int, verifyMode bool) {
-	buf := make([]byte, maxSize)
+func handleMessage(conn *kcp.UDPSession, args *BenchSerOps) {
+	buf := make([]byte, args.MaxBufferSize)
+	packageNumbers := 0
 	for {
 		verified := -1
 		n, err := conn.Read(buf)
+		packageNumbers++
 
-		if verifyMode {
+		if args.EnableVerifyMode {
 			if verifyFixData(buf, n, DefaultVerifyDataLength) {
 				verified = 1
 			} else {
@@ -453,6 +472,16 @@ func handleMessage(conn *kcp.UDPSession, maxSize int, verifyMode bool) {
 			}
 		}
 
+		if args.ExpectVerifyLoopTimes != 0 {
+			if packageNumbers == args.ExpectVerifyLoopTimes {
+				kcp.LogTest("Already recv package numbers: %d", packageNumbers)
+			}
+
+			if packageNumbers > args.ExpectVerifyLoopTimes {
+				kcp.LogWarn("recv package numbers: %d, bigger than expect: %d", packageNumbers, args.ExpectVerifyLoopTimes)
+			}
+		}
+
 		if err != nil {
 			kcp.LogTest("Server side fail to revc: %s", err)
 			return
@@ -479,8 +508,8 @@ func start(args *BenchCliOps) error {
 			sess.EnableMonitor(uint64(args.MonitorInterval), args.DetectRate)
 		}
 
-		for {
-			data, dataLen, err := getRandomData(args.EnableVerifyMode, args.DataRandomMode, args.MinBufferSize, args.MaxBufferSize)
+		doLoop := func(args_ *BenchCliOps) error {
+			data, dataLen, err := getRandomData(args_.EnableVerifyMode, args_.DataRandomMode, args_.MinBufferSize, args_.MaxBufferSize)
 			if err != nil {
 				return err
 			}
@@ -490,11 +519,30 @@ func start(args *BenchCliOps) error {
 			} else {
 				return err
 			}
-			// time.Sleep(time.Second)
+			return nil
 		}
+
+		if args.LoopTimes != 0 {
+			for i := 0; i < args.LoopTimes; i++ {
+				err := doLoop(args)
+				if err != nil {
+					return err
+				}
+			}
+			time.Sleep(time.Second * 10)
+		} else {
+			for {
+				err := doLoop(args)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
 	} else {
 		return err
 	}
+	kcp.LogTest("done!")
 
 	return nil
 }
