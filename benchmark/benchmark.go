@@ -439,7 +439,7 @@ func handleMessage(conn *kcp.UDPSession, maxSize int, verifyMode bool) {
 			}
 		case 0:
 			{
-				kcp.LogWarn("Server side revc: %d, verified failed")
+				kcp.LogWarn("Server side revc: %d, verified failed", n)
 				break
 			}
 		case 1:
