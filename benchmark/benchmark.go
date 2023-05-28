@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -446,6 +447,7 @@ func handleMessage(conn *kcp.UDPSession, args *BenchSerOps) {
 			if verifyFixData(buf, n, DefaultVerifyDataLength) {
 				verified = 1
 			} else {
+				kcp.LogWarn(hex.Dump(buf[0:DefaultVerifyDataLength]))
 				verified = 0
 			}
 		}
