@@ -266,3 +266,50 @@ func TestBufferPoolMtuBound(t *testing.T) {
 	assert.Equal(t, (IKCP_OVERHEAD + 500), len(bp.Used[1][1]))
 	verifySeg(t, bp.Used[1][1], 1000, expectConv, expectByte)
 }
+
+func TestBufferPoolWithReserved(t *testing.T) {
+	var reserved uint32 = 12
+	var ack_mtu uint32 = 5*IKCP_OVERHEAD + reserved
+	var data_mtu uint32 = 3*(IKCP_OVERHEAD+500) + reserved
+	var expectConv uint32 = 123
+	var expectByte byte = 0x6
+
+	bp := NewKCPBufferPool(3, int(reserved))
+
+	var i uint32 = 1
+	for ; i <= 5; i++ {
+		ack_seg := createSegement(i, []byte{}, 0)
+		bp.EncodeAckSegInfo(ack_seg, ack_mtu)
+		assert.Equal(t, 1, bp.GetAckBufferSize())
+		assert.Equal(t, IKCP_OVERHEAD*i+reserved, uint32(len(bp.Used[3][0])))
+		verifySeg(t, bp.Used[3][0][IKCP_OVERHEAD*(i-1)+reserved:], i, expectConv, expectByte)
+	}
+
+	ack_seg := createSegement(6, []byte{}, 0)
+	bp.EncodeAckSegInfo(ack_seg, ack_mtu)
+	assert.Equal(t, 2, bp.GetAckBufferSize())
+	assert.Equal(t, IKCP_OVERHEAD+reserved, uint32(len(bp.Used[3][1])))
+	verifySeg(t, bp.Used[3][1][reserved:], 6, expectConv, expectByte)
+
+	i = 1
+	for ; i <= 3; i++ {
+		buffer := make([]byte, 500)
+		buffer[10] = expectByte
+		seg := createSegement(100+i, buffer, 500)
+		bp.EncodeSegInfo(seg, data_mtu, 1)
+
+		assert.Equal(t, 1, bp.GetBufferSize(1))
+		assert.Equal(t, (IKCP_OVERHEAD+500)*i+reserved, uint32(len(bp.Used[1][0])))
+		verifySeg(t, bp.Used[1][0][(IKCP_OVERHEAD+500)*(i-1)+reserved:], 100+i, expectConv, expectByte)
+	}
+
+	buffer := make([]byte, 500)
+	buffer[10] = expectByte
+	seg := createSegement(1000, buffer, 500)
+	bp.EncodeSegInfo(seg, data_mtu, 1)
+
+	assert.Equal(t, 2, bp.GetBufferSize(1))
+	assert.Equal(t, (IKCP_OVERHEAD+500)+reserved, uint32(len(bp.Used[1][1])))
+	verifySeg(t, bp.Used[1][1][reserved:], 1000, expectConv, expectByte)
+
+}
