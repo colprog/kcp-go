@@ -660,14 +660,16 @@ func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 		msg.Addr = s.remote
 		s.txqueue = append(s.txqueue, msg)
 
-		// If ack here, retryTimes will always be 0
-		for i := 1; uint32(i) < (retryTimes + 1); i++ {
-			var msg_dump ipv4.Message
-			bts_dump := make([]byte, length)
-			copy(bts_dump, buf)
-			msg_dump.Buffers = [][]byte{bts_dump}
-			msg_dump.Addr = s.remote
-			s.txqueue = append(s.txqueue, msg_dump)
+		if globalSessionType == SessionTypeExistMetered {
+			// If ack here, retryTimes will always be 0
+			for i := 1; uint32(i) < (retryTimes + 1); i++ {
+				var msg_dump ipv4.Message
+				bts_dump := make([]byte, length)
+				copy(bts_dump, buf)
+				msg_dump.Buffers = [][]byte{bts_dump}
+				msg_dump.Addr = s.remote
+				s.txqueue = append(s.txqueue, msg_dump)
+			}
 		}
 
 		atomic.AddUint64(&DefaultSnmp.BytesSentFromNoMeteredRaw, uint64(length))
