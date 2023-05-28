@@ -747,18 +747,15 @@ func NewKCPBufferPool(level int, reserved int) *KCPBufferPool {
 	if level > 5 || level < 3 {
 		panic(errors.New("level should between [3,5]"))
 	}
+	LogInfo("New kcp buffer pool with reserve buffer size: %d", reserved)
 
 	bp := new(KCPBufferPool)
 	bp.Level = level
 	bp.Reserved = reserved
 
-	if bp.Reserved != 0 {
-		panic(errors.New("unsupport kcp.reserved yes"))
-	}
-
 	bp.Used = make([][][]byte, level+1)
 	for i := range bp.Used {
-		bp.Used[i] = make([][]byte, reserved, 1024)
+		bp.Used[i] = make([][]byte, 0, 1024)
 	}
 
 	return bp
@@ -785,12 +782,28 @@ func (bp *KCPBufferPool) EncodeAckSegInfo(seg *segment, mtu uint32) {
 	var ack_flat_size = bp.GetAckBufferSize()
 	var used_size = 0
 	if ack_flat_size == 0 {
-		bp.Used[bp.Level] = append(bp.Used[bp.Level], ack_buffer)
+		bp.Used[bp.Level] = make([][]byte, 1)
+
+		if bp.Reserved != 0 {
+			var reserved_buf = make([]byte, bp.Reserved)
+			bp.Used[bp.Level][0] = append(bp.Used[bp.Level][0], reserved_buf...)
+		}
+
+		bp.Used[bp.Level][0] = append(bp.Used[bp.Level][0], ack_buffer...)
 		ack_flat_size += 1
+		used_size = bp.Reserved
 	} else if uint32(len(bp.Used[bp.Level][ack_flat_size-1])+IKCP_OVERHEAD) > mtu {
-		bp.Used[bp.Level] = append(bp.Used[bp.Level], ack_buffer)
+		bp.Used[bp.Level] = append(bp.Used[bp.Level], make([][]byte, 1)...)
+
+		if bp.Reserved != 0 {
+			var reserved_buf = make([]byte, bp.Reserved)
+			bp.Used[bp.Level][ack_flat_size] = append(bp.Used[bp.Level][ack_flat_size], reserved_buf...)
+		}
+
+		bp.Used[bp.Level][ack_flat_size] = append(bp.Used[bp.Level][ack_flat_size], ack_buffer...)
 		ack_flat_size += 1
-	} else {
+		used_size = bp.Reserved
+	} else { // < mtu
 		used_size = len(bp.Used[bp.Level][ack_flat_size-1])
 		bp.Used[bp.Level][ack_flat_size-1] = append(bp.Used[bp.Level][ack_flat_size-1], ack_buffer...)
 	}
@@ -805,13 +818,25 @@ func (bp *KCPBufferPool) EncodeSegInfo(seg *segment, mtu uint32, level int) {
 
 	if buffer_flat_size == 0 {
 		bp.Used[level] = make([][]byte, 1)
+
+		if bp.Reserved != 0 {
+			var reserved_buf = make([]byte, bp.Reserved)
+			bp.Used[level][0] = append(bp.Used[level][0], reserved_buf...)
+		}
+
 		bp.Used[level][0] = append(bp.Used[level][0], seg_header_buffer...)
-		seg.encode(bp.Used[level][0])
+		seg.encode(bp.Used[level][0][bp.Reserved:])
 		bp.Used[level][0] = append(bp.Used[level][0], seg.data...)
 	} else if uint32(len(bp.Used[level][buffer_flat_size-1])+need) > mtu {
 		bp.Used[level] = append(bp.Used[level], make([][]byte, 1)...)
+
+		if bp.Reserved != 0 {
+			var reserved_buf = make([]byte, bp.Reserved)
+			bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], reserved_buf...)
+		}
+
 		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg_header_buffer...)
-		seg.encode(bp.Used[level][buffer_flat_size])
+		seg.encode(bp.Used[level][buffer_flat_size][bp.Reserved:])
 		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg.data...)
 	} else {
 		used_size := len(bp.Used[level][buffer_flat_size-1])
