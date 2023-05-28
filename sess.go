@@ -626,8 +626,6 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 	var ecc [][]byte
 
-	// Temporarily skip the retry logic, and the receiving end also needs to be modified accordingly, as sticking packets can lead to poor parsing of the header
-	retryTimes = 0
 	// 1. FEC encoding
 	if s.fecEncoder != nil {
 		ecc = s.fecEncoder.encode(buf)
@@ -660,11 +658,20 @@ func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 
 		msg.Buffers = [][]byte{bts}
 		msg.Addr = s.remote
+		s.txqueue = append(s.txqueue, msg)
 
-		// If ack here, retryTimes will always be 0
-		for i := 0; uint32(i) < (retryTimes + 1); i++ {
-			s.txqueue = append(s.txqueue, msg)
+		if globalSessionType == SessionTypeExistMetered {
+			// If ack here, retryTimes will always be 0
+			for i := 1; uint32(i) < (retryTimes + 1); i++ {
+				var msg_dump ipv4.Message
+				bts_dump := make([]byte, length)
+				copy(bts_dump, buf)
+				msg_dump.Buffers = [][]byte{bts_dump}
+				msg_dump.Addr = s.remote
+				s.txqueue = append(s.txqueue, msg_dump)
+			}
 		}
+
 		atomic.AddUint64(&DefaultSnmp.BytesSentFromNoMeteredRaw, uint64(length))
 		if shouldAddToMeteredQ {
 			msg.Addr = s.meteredRemote
