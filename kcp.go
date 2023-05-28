@@ -2,9 +2,12 @@ package kcp
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math/rand"
 	"sync/atomic"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 const (
@@ -43,7 +46,7 @@ var refTime time.Time = time.Now()
 func currentMs() uint32 { return uint32(time.Since(refTime) / time.Millisecond) }
 
 // output_callback is a prototype which ought capture conn and call conn.Write
-type output_callback func(buf []byte, size int, important bool)
+type output_callback func(buf []byte, size int, important bool, retryTimes uint32)
 
 /* encode 8 bits unsigned int */
 func ikcp_encode8u(p []byte, c byte) []byte {
@@ -728,6 +731,96 @@ func (kcp *KCP) wnd_unused() uint16 {
 	return 0
 }
 
+const DEFAULT_BUFFER_POOL_LEVEL = 3
+
+type KCPBufferPool struct {
+	Used [][][]byte
+	// 0 - (level-1) is the normal buffer bucket
+	// normal buffer bucket used retry times to distinguish level
+	// The level bucket holding the ack buffer
+	// When init a buffer pool need level + 1 space
+	Level    int
+	Reserved int
+}
+
+func NewKCPBufferPool(level int, reserved int) *KCPBufferPool {
+	if level > 5 || level < 3 {
+		panic(errors.New("level should between [3,5]"))
+	}
+
+	bp := new(KCPBufferPool)
+	bp.Level = level
+	bp.Reserved = reserved
+
+	if bp.Reserved != 0 {
+		panic(errors.New("unsupport kcp.reserved yes"))
+	}
+
+	bp.Used = make([][][]byte, level+1)
+	for i := range bp.Used {
+		bp.Used[i] = make([][]byte, reserved, 1024)
+	}
+
+	return bp
+}
+
+func (bp *KCPBufferPool) getBufferSize(level int, isAck bool) int {
+	if level > bp.Level || (!isAck && level == bp.Level) {
+		panic(errors.New(fmt.Sprintf("invalid level %d, bp.Level is %d", level, bp.Level)))
+	}
+
+	return len(bp.Used[level])
+}
+
+func (bp *KCPBufferPool) GetBufferSize(level int) int {
+	return bp.getBufferSize(level, false)
+}
+
+func (bp *KCPBufferPool) GetAckBufferSize() int {
+	return bp.getBufferSize(bp.Level, true)
+}
+
+func (bp *KCPBufferPool) EncodeAckSegInfo(seg *segment, mtu uint32) {
+	var ack_buffer = make([]byte, IKCP_OVERHEAD)
+	var ack_flat_size = bp.GetAckBufferSize()
+	var used_size = 0
+	if ack_flat_size == 0 {
+		bp.Used[bp.Level] = append(bp.Used[bp.Level], ack_buffer)
+		ack_flat_size += 1
+	} else if uint32(len(bp.Used[bp.Level][ack_flat_size-1])+IKCP_OVERHEAD) > mtu {
+		bp.Used[bp.Level] = append(bp.Used[bp.Level], ack_buffer)
+		ack_flat_size += 1
+	} else {
+		used_size = len(bp.Used[bp.Level][ack_flat_size-1])
+		bp.Used[bp.Level][ack_flat_size-1] = append(bp.Used[bp.Level][ack_flat_size-1], ack_buffer...)
+	}
+
+	seg.encode(bp.Used[bp.Level][ack_flat_size-1][used_size:])
+}
+
+func (bp *KCPBufferPool) EncodeSegInfo(seg *segment, mtu uint32, level int) {
+	var need = len(seg.data) + IKCP_OVERHEAD
+	var seg_header_buffer = make([]byte, IKCP_OVERHEAD)
+	var buffer_flat_size = bp.GetBufferSize(level)
+
+	if buffer_flat_size == 0 {
+		bp.Used[level] = make([][]byte, 1)
+		bp.Used[level][0] = append(bp.Used[level][0], seg_header_buffer...)
+		seg.encode(bp.Used[level][0])
+		bp.Used[level][0] = append(bp.Used[level][0], seg.data...)
+	} else if uint32(len(bp.Used[level][buffer_flat_size-1])+need) > mtu {
+		bp.Used[level] = append(bp.Used[level], make([][]byte, 1)...)
+		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg_header_buffer...)
+		seg.encode(bp.Used[level][buffer_flat_size])
+		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg.data...)
+	} else {
+		used_size := len(bp.Used[level][buffer_flat_size-1])
+		bp.Used[level][buffer_flat_size-1] = append(bp.Used[level][buffer_flat_size-1], seg_header_buffer...)
+		seg.encode(bp.Used[level][buffer_flat_size-1][used_size:])
+		bp.Used[level][buffer_flat_size-1] = append(bp.Used[level][buffer_flat_size-1], seg.data...)
+	}
+}
+
 // flush pending data
 func (kcp *KCP) flush(ackOnly bool) uint32 {
 	var seg segment
@@ -736,58 +829,94 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	seg.wnd = kcp.wnd_unused()
 	seg.una = kcp.rcv_nxt
 
-	buffer := kcp.buffer
-	ptr := buffer[kcp.reserved:] // keep n bytes untouched
-	sendAllAcksMetered := kcp.send_all_acks_through_metered_ip
+	// buffer := kcp.buffer
+	// ptr := buffer[kcp.reserved:] // keep n bytes untouched
+
+	// sendAllAcksMetered := kcp.send_all_acks_through_metered_ip
 	aggressiveness := kcp.metered_ip_aggressiveness
 
-	// makeSpace makes room for writing
-	makeSpace := func(space int, important bool) bool {
-		size := len(buffer) - len(ptr)
-		if size+space > int(kcp.mtu) {
-			kcp.output(buffer, size, important)
-			ptr = buffer[kcp.reserved:]
-			return false
+	bp := NewKCPBufferPool(DEFAULT_BUFFER_POOL_LEVEL, kcp.reserved)
+	bpi := NewKCPBufferPool(DEFAULT_BUFFER_POOL_LEVEL, kcp.reserved)
+
+	getBPLevel := func(retryTimes uint32) int {
+		if retryTimes >= uint32(bp.Level) {
+			return bp.Level - 1
 		}
-		return important
+		return int(retryTimes)
 	}
 
-	// flush bytes in buffer if there is any
-	flushBuffer := func(important bool) bool {
-		size := len(buffer) - len(ptr)
-		if size > kcp.reserved {
-			kcp.output(buffer, size, important)
-			return false
-		}
-		return important
+	encodeAckSegInfo := func(seg *segment) {
+		bpi.EncodeAckSegInfo(seg, kcp.mtu)
 	}
 
-	// flush acknowledges
-	flushACK := func(important bool) bool {
+	encodeSegInfo := func(seg *segment, important bool, retryTimes uint32) {
+		level := getBPLevel(retryTimes)
+
+		if important {
+			bpi.EncodeSegInfo(seg, kcp.mtu, level)
+		} else {
+			bp.EncodeSegInfo(seg, kcp.mtu, level)
+		}
+	}
+
+	fullACK := func() {
 		if len(kcp.acklist) == 0 {
-			return false
+			return
 		}
 
 		seg.cmd = IKCP_CMD_ACK
 		for i, ack := range kcp.acklist {
-			makeSpace(IKCP_OVERHEAD, important)
 			// filter jitters caused by bufferbloat
 			if _itimediff(ack.sn, kcp.rcv_nxt) >= 0 || len(kcp.acklist)-1 == i {
 				seg.sn, seg.ts = ack.sn, ack.ts
-				ptr = seg.encode(ptr)
+				encodeAckSegInfo(&seg)
 			}
 		}
 		kcp.acklist = kcp.acklist[0:0]
-		return true
 	}
 
-	if ackOnly { // flash remain ack segments
-		flushACK(sendAllAcksMetered)
-		flushBuffer(sendAllAcksMetered)
+	flushBuffer := func() {
+		// contain ack
+		for i := bpi.Level; i >= 0; i-- {
+			var size int
+			if i == bpi.Level {
+				size = bpi.GetAckBufferSize()
+			} else {
+				size = bpi.GetBufferSize(i)
+			}
+
+			if size != 0 {
+				for _, mtu_buffer := range bpi.Used[i] {
+					if i == bpi.Level {
+						kcp.output(mtu_buffer, len(mtu_buffer), true, 0)
+					} else {
+						kcp.output(mtu_buffer, len(mtu_buffer), true, uint32(i))
+					}
+
+				}
+				bpi.Used[i] = nil
+			}
+		}
+
+		for i := bp.Level - 1; i >= 0; i-- {
+			size := bp.GetBufferSize(i)
+			if size != 0 {
+
+				for _, mtu_buffer := range bp.Used[i] {
+					kcp.output(mtu_buffer, len(mtu_buffer), false, uint32(i))
+				}
+
+				bp.Used[i] = nil
+			}
+		}
+	}
+
+	fullACK()
+
+	if ackOnly { // flush remain ack segments
+		flushBuffer()
 		return kcp.interval
 	}
-
-	promoteToImportant := sendAllAcksMetered && flushACK(true)
 
 	// probe window size (if remote window size equals zero)
 	if kcp.rmt_wnd == 0 {
@@ -816,17 +945,17 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	// flush window probing commands
 	if (kcp.probe & IKCP_ASK_SEND) != 0 {
 		seg.cmd = IKCP_CMD_WASK
-		promoteToImportant = true
-		makeSpace(IKCP_OVERHEAD, promoteToImportant)
-		ptr = seg.encode(ptr)
+		// Make default IKCP_CMD_WASK retry(fake) 1
+		// It will reduces packet loss
+		encodeAckSegInfo(&seg)
 	}
 
 	// flush window probing commands
 	if (kcp.probe & IKCP_ASK_TELL) != 0 {
 		seg.cmd = IKCP_CMD_WINS
-		promoteToImportant = true
-		makeSpace(IKCP_OVERHEAD, promoteToImportant)
-		ptr = seg.encode(ptr)
+		// Make default IKCP_CMD_WINS retry(fake) 1
+		// It will reduces packet loss
+		encodeAckSegInfo(&seg)
 	}
 
 	kcp.probe = 0
@@ -851,14 +980,13 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		kcp.snd_nxt++
 		newSegsCount++
 	}
+
 	if newSegsCount > 0 {
 		kcp.snd_queue = kcp.remove_front(kcp.snd_queue, newSegsCount)
 	} else {
 		// 滑动窗口若无进展（窗口满或无新数据），提高发送优先级，希望能推动窗口进展
-		if aggressiveness >= 1 {
-			promoteToImportant = true
-		} else {
-			promoteToImportant = flushACK(true) || promoteToImportant
+		if aggressiveness < 1 {
+			fullACK()
 		}
 	}
 
@@ -925,19 +1053,21 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			segment.wnd = seg.wnd
 			segment.una = seg.una
 
-			willPromote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
+			promote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
+
 			// If globalSessionType is SessionTypeNormal
 			// Then current segment or ack won't be promote in `output`
-			if (willPromote || promoteToImportant) && globalSessionType != SessionTypeNormal {
+			if promote && globalSessionType != SessionTypeNormal {
 				segment.has_promote = true
 			}
-			flushACK(willPromote || promoteToImportant)
 
-			need := IKCP_OVERHEAD + len(segment.data)
-			promoteToImportant = makeSpace(need, promoteToImportant) || willPromote
-			ptr = segment.encode(ptr)
-			copy(ptr, segment.data)
-			ptr = ptr[len(segment.data):]
+			// TBD: should allow ack not use meter ?
+			fullACK()
+
+			encodeSegInfo(segment, promote, segment.xmit-1)
+			if segment.sn == 0 {
+				flushBuffer()
+			}
 
 			if segment.xmit >= kcp.dead_link {
 				kcp.state = 0xFFFFFFFF
@@ -950,9 +1080,8 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		}
 	}
 
-	flushACK(promoteToImportant)
-	// flash remain segments
-	flushBuffer(promoteToImportant)
+	fullACK()
+	flushBuffer()
 
 	// counter updates
 	sum := lostSegs
