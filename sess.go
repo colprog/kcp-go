@@ -66,6 +66,8 @@ var (
 	globalSessionType int32 = SessionTypeNormal
 	// no need use atomic value
 	GlobalMontorChannel bool = false
+
+	GlobalEnableRetryTimes bool = true
 )
 
 func RunningAsNormal() {
@@ -625,6 +627,10 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 // 4. TxQueue
 func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 	var ecc [][]byte
+
+	if !GlobalEnableRetryTimes {
+		retryTimes = 0
+	}
 
 	// 1. FEC encoding
 	if s.fecEncoder != nil {
