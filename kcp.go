@@ -936,9 +936,8 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		}
 	}
 
-	fullACK()
-
 	if ackOnly { // flush remain ack segments
+		fullACK()
 		flushBuffer()
 		return kcp.interval
 	}
@@ -993,8 +992,10 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 	// sliding window, controlled by snd_nxt && sna_una+cwnd
 	newSegsCount := 0
+	cwnd_full := false
 	for k := range kcp.snd_queue {
 		if _itimediff(kcp.snd_nxt, kcp.snd_una+cwnd) >= 0 {
+			cwnd_full = true
 			break
 		}
 		newseg := kcp.snd_queue[k]
@@ -1008,10 +1009,11 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 	if newSegsCount > 0 {
 		kcp.snd_queue = kcp.remove_front(kcp.snd_queue, newSegsCount)
-	} else {
+	} else if cwnd_full {
 		// 滑动窗口若无进展（窗口满或无新数据），提高发送优先级，希望能推动窗口进展
 		if aggressiveness < 1 {
 			fullACK()
+			flushBuffer()
 		}
 	}
 
@@ -1086,14 +1088,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 				segment.has_promote = true
 			}
 
-			// TBD: should allow ack not use meter ?
-			fullACK()
-
 			encodeSegInfo(segment, promote, segment.xmit-1)
-			if segment.sn == 0 {
-				flushBuffer()
-			}
-
 			if segment.xmit >= kcp.dead_link {
 				kcp.state = 0xFFFFFFFF
 			}
