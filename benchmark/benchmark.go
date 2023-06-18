@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"time"
 
@@ -26,6 +28,7 @@ type (
 		DetectRate          float64 `json:"DetectRate"`
 		LoopTimes           int     `json:"LoopTimes"`
 		EnableVerifyMode    bool    `json:"EnableVerifyMode"`
+		EnablePProf         bool    `json:"EnablePProf"`
 	}
 
 	BenchSerOps struct {
@@ -36,6 +39,7 @@ type (
 		StatisticalInterval   int     `json:"StatisticalInterval"`
 		EnableVerifyMode      bool    `json:"EnableVerifyMode"`
 		ExpectVerifyLoopTimes int     `json:"ExpectVerifyLoopTimes"`
+		EnablePProf           bool    `json:"EnablePProf"`
 	}
 
 	BenchOps struct {
@@ -131,6 +135,11 @@ func main() {
 						Usage: "current flags should same as client loop times, make sure client won't send any package bigger than mtu(1500) ",
 						Value: 0,
 					},
+					&cli.BoolFlag{
+						Name:  "enable-pprof",
+						Usage: "enable start pprof sever. server side port is 10077",
+						Value: false,
+					},
 				},
 				Action: func(c *cli.Context) error {
 					runMode = ServerMode
@@ -141,6 +150,7 @@ func main() {
 					benchSerOps.StatisticalInterval = c.Int("statistical-interval")
 					benchSerOps.EnableVerifyMode = c.Bool("enable-verify-mode")
 					benchSerOps.ExpectVerifyLoopTimes = c.Int("expect-verify-loop-times")
+					benchSerOps.EnablePProf = c.Bool("enable-pprof")
 
 					if len(benchSerOps.MeteredAddress) == 0 {
 						return errors.New("invalid MeteredAddress")
@@ -239,6 +249,11 @@ func main() {
 						Usage: "after enabled verify, some of args will been ignored",
 						Value: false,
 					},
+					&cli.BoolFlag{
+						Name:  "enable-pprof",
+						Usage: "enable start pprof sever. client side port is 10078",
+						Value: false,
+					},
 				},
 				Action: func(c *cli.Context) error {
 					runMode = ClientMode
@@ -253,6 +268,7 @@ func main() {
 					benchCliOps.DetectRate = c.Float64("detect-rate")
 					benchCliOps.LoopTimes = c.Int("loop-times")
 					benchCliOps.EnableVerifyMode = c.Bool("enable-verify-mode")
+					benchCliOps.EnablePProf = c.Bool("enable-pprof")
 
 					if len(benchCliOps.RemoteMeterAddr) == 0 {
 						return errors.New("invalid RemoteMeterAddr")
@@ -417,6 +433,13 @@ func startServer(args *BenchSerOps) error {
 		return err
 	}
 
+	if args.EnablePProf {
+		go func() {
+			kcp.LogTest("Starting pprof server in 10077")
+			panic(http.ListenAndServe(":10077", nil))
+		}()
+	}
+
 	slowListener.NewControllerServer(nil)
 
 	snmpTicker := startServerSnmpTricker(args)
@@ -496,6 +519,13 @@ func start(args *BenchCliOps) error {
 
 	snmpTicker := startClientSnmpTricker(args)
 	defer snmpTicker.Stop()
+
+	if args.EnablePProf {
+		go func() {
+			kcp.LogTest("Starting pprof server in 10078")
+			panic(http.ListenAndServe(":10078", nil))
+		}()
+	}
 
 	remoteSlowAddrStr := fmt.Sprintf("%s:%d", args.RemoteAddress, args.RemoteSlowAddr)
 	kcp.LogTest("Connect to: %s", remoteSlowAddrStr)
