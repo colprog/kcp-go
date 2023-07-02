@@ -874,8 +874,9 @@ func (bp *KCPBufferPool) CombineACKIfAllow() {
 
 	if ack_flat_size != 0 && level_0_flat_size != 0 &&
 		bp.mtu-level_0_buffer_off > ack_buffer_len {
+
 		ack_buffer := bp.Used[C32T64(bp.Level, ack_flat_size-1)]
-		level_0_buffer := bp.Used[C32T64(0, ack_flat_size-1)]
+		level_0_buffer := bp.Used[C32T64(0, level_0_flat_size-1)]
 
 		bp.UsedIndex[C32T64(0, level_0_flat_size-1)] += uint32(copy((*level_0_buffer)[level_0_buffer_off:], (*ack_buffer)[bp.Reserved:ack_buffer_len]))
 

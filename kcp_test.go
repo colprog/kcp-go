@@ -317,3 +317,107 @@ func TestBufferPoolWithReserved(t *testing.T) {
 	verifySeg(t, (*bp.Used[C32T64(1, 1)])[reserved:], IKCP_OVERHEAD+1000, 1000, expectConv, expectByte)
 
 }
+
+func TestBufferPoolCombineACK(t *testing.T) {
+	var mtu uint32 = 1500
+	var expectConv uint32 = 123
+	var expectByte byte = 0x6
+
+	bp := NewKCPBufferPool(3, 0, mtu)
+
+	ack_seg := createSegement(777, []byte{}, 0)
+	bp.EncodeAckSegInfo(ack_seg)
+
+	assert.Equal(t, uint32(1), bp.GetAckBufferSize())
+	assert.Equal(t, uint32(IKCP_OVERHEAD), bp.UsedIndex[C32T64(3, 0)])
+	verifySeg(t, (*bp.Used[C32T64(3, 0)]), IKCP_OVERHEAD, 777, expectConv, expectByte)
+
+	// should do nothing, because no data in level 0
+	bp.CombineACKIfAllow()
+
+	assert.Equal(t, uint32(1), bp.GetAckBufferSize())
+	assert.Equal(t, uint32(IKCP_OVERHEAD), bp.UsedIndex[C32T64(3, 0)])
+	verifySeg(t, (*bp.Used[C32T64(3, 0)]), IKCP_OVERHEAD, 777, expectConv, expectByte)
+
+	buffer := make([]byte, 500)
+	buffer[10] = expectByte
+	seg := createSegement(25, buffer, 500)
+	bp.EncodeSegInfo(seg, 1)
+	assert.Equal(t, uint32(1), bp.GetBufferSize(1))
+	assert.Equal(t, uint32(IKCP_OVERHEAD+500), bp.UsedIndex[C32T64(1, 0)])
+	verifySeg(t, (*bp.Used[C32T64(1, 0)]), bp.UsedIndex[C32T64(1, 0)], 25, expectConv, expectByte)
+
+	// should do nothing, because no data in level 0
+	bp.CombineACKIfAllow()
+
+	assert.Equal(t, uint32(1), bp.GetAckBufferSize())
+	assert.Equal(t, uint32(IKCP_OVERHEAD), bp.UsedIndex[C32T64(3, 0)])
+	verifySeg(t, (*bp.Used[C32T64(3, 0)]), IKCP_OVERHEAD, 777, expectConv, expectByte)
+
+	buffer = make([]byte, mtu-IKCP_OVERHEAD)
+	buffer[10] = expectByte
+	seg = createSegement(26, buffer, int(mtu-IKCP_OVERHEAD))
+	bp.EncodeSegInfo(seg, 0)
+	assert.Equal(t, uint32(1), bp.GetBufferSize(0))
+	assert.Equal(t, uint32(mtu), bp.UsedIndex[C32T64(0, 0)])
+	verifySeg(t, (*bp.Used[C32T64(0, 0)]), bp.UsedIndex[C32T64(0, 0)], 26, expectConv, expectByte)
+
+	// still do nothing, because data is full in level 0
+	bp.CombineACKIfAllow()
+
+	assert.Equal(t, uint32(1), bp.GetAckBufferSize())
+	assert.Equal(t, uint32(IKCP_OVERHEAD), bp.UsedIndex[C32T64(3, 0)])
+	verifySeg(t, (*bp.Used[C32T64(3, 0)]), IKCP_OVERHEAD, 777, expectConv, expectByte)
+
+	buffer = make([]byte, 500)
+	buffer[10] = expectByte
+	seg = createSegement(27, buffer, 500)
+	bp.EncodeSegInfo(seg, 0)
+	assert.Equal(t, uint32(2), bp.GetBufferSize(0))
+	assert.Equal(t, uint32(500+IKCP_OVERHEAD), bp.UsedIndex[C32T64(0, 1)])
+	verifySeg(t, (*bp.Used[C32T64(0, 1)]), bp.UsedIndex[C32T64(0, 1)], 27, expectConv, expectByte)
+
+	// should be copy to level 0 flat 1
+	bp.CombineACKIfAllow()
+
+	assert.Equal(t, uint32(0), bp.GetAckBufferSize())
+	assert.Equal(t, uint32(0), bp.UsedIndex[C32T64(3, 0)])
+	assert.Equal(t, uint32(2), bp.GetBufferSize(0))
+	assert.Equal(t, uint32(500+IKCP_OVERHEAD+IKCP_OVERHEAD), bp.UsedIndex[C32T64(0, 1)])
+
+	verifySeg(t, (*bp.Used[C32T64(0, 1)])[500+IKCP_OVERHEAD:], IKCP_OVERHEAD, 777, expectConv, expectByte)
+}
+
+func TestBufferPoolCombineACKWithReserved(t *testing.T) {
+	var mtu uint32 = 1500
+	var expectConv uint32 = 123
+	var expectByte byte = 0x6
+	var reserved int = 12
+
+	bp := NewKCPBufferPool(3, reserved, mtu)
+
+	ack_seg := createSegement(777, []byte{}, 0)
+	bp.EncodeAckSegInfo(ack_seg)
+
+	assert.Equal(t, uint32(1), bp.GetAckBufferSize())
+	assert.Equal(t, uint32(IKCP_OVERHEAD+reserved), bp.UsedIndex[C32T64(3, 0)])
+	verifySeg(t, (*bp.Used[C32T64(3, 0)])[reserved:], IKCP_OVERHEAD, 777, expectConv, expectByte)
+
+	buffer := make([]byte, 500)
+	buffer[10] = expectByte
+	seg := createSegement(27, buffer, 500)
+	bp.EncodeSegInfo(seg, 0)
+	assert.Equal(t, uint32(1), bp.GetBufferSize(0))
+	assert.Equal(t, uint32(500+IKCP_OVERHEAD+reserved), bp.UsedIndex[C32T64(0, 0)])
+	verifySeg(t, (*bp.Used[C32T64(0, 0)])[reserved:], bp.UsedIndex[C32T64(0, 0)], 27, expectConv, expectByte)
+
+	// should be copy to level 0 flat 0
+	bp.CombineACKIfAllow()
+
+	assert.Equal(t, uint32(0), bp.GetAckBufferSize())
+	assert.Equal(t, uint32(0), bp.UsedIndex[C32T64(3, 0)])
+	assert.Equal(t, uint32(1), bp.GetBufferSize(0))
+	assert.Equal(t, uint32(500+IKCP_OVERHEAD+IKCP_OVERHEAD+reserved), bp.UsedIndex[C32T64(0, 0)])
+
+	verifySeg(t, (*bp.Used[C32T64(0, 0)])[500+IKCP_OVERHEAD+reserved:], IKCP_OVERHEAD, 777, expectConv, expectByte)
+}
