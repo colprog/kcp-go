@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/rand"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -734,115 +735,155 @@ func (kcp *KCP) wnd_unused() uint16 {
 const DEFAULT_BUFFER_POOL_LEVEL = 3
 
 type KCPBufferPool struct {
-	Used [][][]byte
+
+	// 0b-32b level
+	// 32b-64b flat
+	Used      map[uint64]*[]byte
+	UsedFlat  map[uint32]uint32
+	UsedIndex map[uint64]uint32
 	// 0 - (level-1) is the normal buffer bucket
 	// normal buffer bucket used retry times to distinguish level
 	// The level bucket holding the ack buffer
 	// When init a buffer pool need level + 1 space
-	Level    int
+	Level    uint32
 	Reserved int
+
+	reuse sync.Pool
+	mtu   uint32
 }
 
-func NewKCPBufferPool(level int, reserved int) *KCPBufferPool {
+func C32T64(high uint32, low uint32) uint64 {
+	high64 := uint64(high) << 32
+	result := high64 | uint64(low)
+	return result
+}
+
+func C64T32(value uint64) (uint32, uint32) {
+	high := uint32(value >> 32)
+	low := uint32(value)
+	return high, low
+}
+
+func NewKCPBufferPool(level uint32, reserved int, mtu uint32) *KCPBufferPool {
 	if level > 5 || level < 3 {
 		panic(errors.New("level should between [3,5]"))
 	}
-	LogInfo("New kcp buffer pool with reserve buffer size: %d", reserved)
 
 	bp := new(KCPBufferPool)
 	bp.Level = level
 	bp.Reserved = reserved
-
-	bp.Used = make([][][]byte, level+1)
-	for i := range bp.Used {
-		bp.Used[i] = make([][]byte, 0, 1024)
+	bp.mtu = mtu
+	bp.reuse.New = func() interface{} {
+		b := make([]byte, mtu)
+		return &b
 	}
+
+	bp.Used = make(map[uint64]*[]byte)
+	bp.UsedFlat = make(map[uint32]uint32)
+	bp.UsedIndex = make(map[uint64]uint32)
 
 	return bp
 }
 
-func (bp *KCPBufferPool) getBufferSize(level int, isAck bool) int {
+func (bp *KCPBufferPool) getBufferSize(level uint32, isAck bool) uint32 {
 	if level > bp.Level || (!isAck && level == bp.Level) {
 		panic(errors.New(fmt.Sprintf("invalid level %d, bp.Level is %d", level, bp.Level)))
 	}
 
-	return len(bp.Used[level])
+	return bp.UsedFlat[level]
 }
 
-func (bp *KCPBufferPool) GetBufferSize(level int) int {
+func (bp *KCPBufferPool) GetBufferSize(level uint32) uint32 {
 	return bp.getBufferSize(level, false)
 }
 
-func (bp *KCPBufferPool) GetAckBufferSize() int {
+func (bp *KCPBufferPool) GetAckBufferSize() uint32 {
 	return bp.getBufferSize(bp.Level, true)
 }
 
-func (bp *KCPBufferPool) EncodeAckSegInfo(seg *segment, mtu uint32) {
+func (bp *KCPBufferPool) EncodeAckSegInfo(seg *segment) {
 	var ack_buffer = make([]byte, IKCP_OVERHEAD)
 	var ack_flat_size = bp.GetAckBufferSize()
-	var used_size = 0
+	var used_size uint32 = 0
 	if ack_flat_size == 0 {
-		bp.Used[bp.Level] = make([][]byte, 1)
+		reuse_buffer := bp.reuse.Get().(*[]byte)
+		bp.Used[C32T64(bp.Level, 0)] = reuse_buffer
+		bp.UsedIndex[C32T64(bp.Level, 0)] = uint32(bp.Reserved + copy((*reuse_buffer)[bp.Reserved:], ack_buffer))
 
-		if bp.Reserved != 0 {
-			var reserved_buf = make([]byte, bp.Reserved)
-			bp.Used[bp.Level][0] = append(bp.Used[bp.Level][0], reserved_buf...)
-		}
-
-		bp.Used[bp.Level][0] = append(bp.Used[bp.Level][0], ack_buffer...)
 		ack_flat_size += 1
-		used_size = bp.Reserved
-	} else if uint32(len(bp.Used[bp.Level][ack_flat_size-1])+IKCP_OVERHEAD) > mtu {
-		bp.Used[bp.Level] = append(bp.Used[bp.Level], make([][]byte, 1)...)
+		bp.UsedFlat[bp.Level] = ack_flat_size
+		used_size = uint32(bp.Reserved)
+	} else if bp.UsedIndex[C32T64(bp.Level, ack_flat_size-1)]+IKCP_OVERHEAD > bp.mtu {
+		reuse_buffer := bp.reuse.Get().(*[]byte)
+		bp.Used[C32T64(bp.Level, ack_flat_size)] = reuse_buffer
+		bp.UsedIndex[C32T64(bp.Level, ack_flat_size)] =
+			uint32(bp.Reserved + copy((*reuse_buffer)[bp.Reserved:], ack_buffer))
 
-		if bp.Reserved != 0 {
-			var reserved_buf = make([]byte, bp.Reserved)
-			bp.Used[bp.Level][ack_flat_size] = append(bp.Used[bp.Level][ack_flat_size], reserved_buf...)
-		}
-
-		bp.Used[bp.Level][ack_flat_size] = append(bp.Used[bp.Level][ack_flat_size], ack_buffer...)
 		ack_flat_size += 1
-		used_size = bp.Reserved
+		bp.UsedFlat[bp.Level] = ack_flat_size
+		used_size = uint32(bp.Reserved)
 	} else { // < mtu
-		used_size = len(bp.Used[bp.Level][ack_flat_size-1])
-		bp.Used[bp.Level][ack_flat_size-1] = append(bp.Used[bp.Level][ack_flat_size-1], ack_buffer...)
+		used_size = bp.UsedIndex[C32T64(bp.Level, ack_flat_size-1)]
+		used_buffer := bp.Used[C32T64(bp.Level, ack_flat_size-1)]
+		bp.UsedIndex[C32T64(bp.Level, ack_flat_size-1)] += uint32(copy((*used_buffer)[used_size:], ack_buffer))
 	}
 
-	seg.encode(bp.Used[bp.Level][ack_flat_size-1][used_size:])
+	seg.encode((*bp.Used[C32T64(bp.Level, ack_flat_size-1)])[used_size:])
 }
 
-func (bp *KCPBufferPool) EncodeSegInfo(seg *segment, mtu uint32, level int) {
+func (bp *KCPBufferPool) EncodeSegInfo(seg *segment, level uint32) {
 	var need = len(seg.data) + IKCP_OVERHEAD
-	var seg_header_buffer = make([]byte, IKCP_OVERHEAD)
 	var buffer_flat_size = bp.GetBufferSize(level)
+	var used_size uint32 = 0
 
 	if buffer_flat_size == 0 {
-		bp.Used[level] = make([][]byte, 1)
+		reuse_buffer := bp.reuse.Get().(*[]byte)
+		bp.Used[C32T64(level, 0)] = reuse_buffer
 
-		if bp.Reserved != 0 {
-			var reserved_buf = make([]byte, bp.Reserved)
-			bp.Used[level][0] = append(bp.Used[level][0], reserved_buf...)
-		}
+		bp.UsedIndex[C32T64(level, 0)] = uint32(bp.Reserved + IKCP_OVERHEAD + copy((*reuse_buffer)[bp.Reserved+IKCP_OVERHEAD:], seg.data))
 
-		bp.Used[level][0] = append(bp.Used[level][0], seg_header_buffer...)
-		seg.encode(bp.Used[level][0][bp.Reserved:])
-		bp.Used[level][0] = append(bp.Used[level][0], seg.data...)
-	} else if uint32(len(bp.Used[level][buffer_flat_size-1])+need) > mtu {
-		bp.Used[level] = append(bp.Used[level], make([][]byte, 1)...)
+		buffer_flat_size += 1
+		bp.UsedFlat[level] = buffer_flat_size
 
-		if bp.Reserved != 0 {
-			var reserved_buf = make([]byte, bp.Reserved)
-			bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], reserved_buf...)
-		}
+		used_size = uint32(bp.Reserved)
+	} else if bp.UsedIndex[C32T64(level, buffer_flat_size-1)]+uint32(need) > uint32(bp.mtu) {
 
-		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg_header_buffer...)
-		seg.encode(bp.Used[level][buffer_flat_size][bp.Reserved:])
-		bp.Used[level][buffer_flat_size] = append(bp.Used[level][buffer_flat_size], seg.data...)
+		reuse_buffer := bp.reuse.Get().(*[]byte)
+		bp.Used[C32T64(level, buffer_flat_size)] = reuse_buffer
+		bp.UsedIndex[C32T64(level, buffer_flat_size)] =
+			uint32(bp.Reserved + IKCP_OVERHEAD + copy((*reuse_buffer)[bp.Reserved+IKCP_OVERHEAD:], seg.data))
+
+		buffer_flat_size += 1
+		bp.UsedFlat[level] = buffer_flat_size
+		used_size = uint32(bp.Reserved)
 	} else {
-		used_size := len(bp.Used[level][buffer_flat_size-1])
-		bp.Used[level][buffer_flat_size-1] = append(bp.Used[level][buffer_flat_size-1], seg_header_buffer...)
-		seg.encode(bp.Used[level][buffer_flat_size-1][used_size:])
-		bp.Used[level][buffer_flat_size-1] = append(bp.Used[level][buffer_flat_size-1], seg.data...)
+
+		used_size = bp.UsedIndex[C32T64(level, buffer_flat_size-1)]
+		used_buffer := bp.Used[C32T64(level, buffer_flat_size-1)]
+		bp.UsedIndex[C32T64(level, buffer_flat_size-1)] += IKCP_OVERHEAD + uint32(copy((*used_buffer)[used_size+IKCP_OVERHEAD:], seg.data))
+	}
+
+	seg.encode((*bp.Used[C32T64(level, buffer_flat_size-1)])[used_size:])
+}
+
+func (bp *KCPBufferPool) CombineACKIfAllow() {
+	ack_flat_size := bp.UsedFlat[bp.Level]
+	level_0_flat_size := bp.UsedFlat[0]
+	ack_buffer_len := bp.UsedIndex[C32T64(bp.Level, ack_flat_size-1)]
+	level_0_buffer_off := bp.UsedIndex[C32T64(0, level_0_flat_size-1)]
+
+	if ack_flat_size != 0 && level_0_flat_size != 0 &&
+		bp.mtu-level_0_buffer_off > ack_buffer_len {
+		ack_buffer := bp.Used[C32T64(bp.Level, ack_flat_size-1)]
+		level_0_buffer := bp.Used[C32T64(0, ack_flat_size-1)]
+
+		bp.UsedIndex[C32T64(0, level_0_flat_size-1)] += uint32(copy((*level_0_buffer)[level_0_buffer_off:], (*ack_buffer)[bp.Reserved:ack_buffer_len]))
+
+		bp.reuse.Put(bp.Used[C32T64(bp.Level, ack_flat_size-1)])
+
+		bp.UsedFlat[bp.Level] = ack_flat_size - 1
+		delete(bp.Used, C32T64(bp.Level, ack_flat_size-1))
+		delete(bp.UsedIndex, C32T64(bp.Level, ack_flat_size-1))
 	}
 }
 
@@ -854,33 +895,29 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	seg.wnd = kcp.wnd_unused()
 	seg.una = kcp.rcv_nxt
 
-	// buffer := kcp.buffer
-	// ptr := buffer[kcp.reserved:] // keep n bytes untouched
-
-	// sendAllAcksMetered := kcp.send_all_acks_through_metered_ip
 	aggressiveness := kcp.metered_ip_aggressiveness
 
-	bp := NewKCPBufferPool(DEFAULT_BUFFER_POOL_LEVEL, kcp.reserved)
-	bpi := NewKCPBufferPool(DEFAULT_BUFFER_POOL_LEVEL, kcp.reserved)
+	bp := NewKCPBufferPool(DEFAULT_BUFFER_POOL_LEVEL, kcp.reserved, kcp.mtu)
+	bpi := NewKCPBufferPool(DEFAULT_BUFFER_POOL_LEVEL, kcp.reserved, kcp.mtu)
 
-	getBPLevel := func(retryTimes uint32) int {
+	getBPLevel := func(retryTimes uint32) uint32 {
 		if retryTimes >= uint32(bp.Level) {
 			return bp.Level - 1
 		}
-		return int(retryTimes)
+		return retryTimes
 	}
 
 	encodeAckSegInfo := func(seg *segment) {
-		bpi.EncodeAckSegInfo(seg, kcp.mtu)
+		bpi.EncodeAckSegInfo(seg)
 	}
 
 	encodeSegInfo := func(seg *segment, important bool, retryTimes uint32) {
 		level := getBPLevel(retryTimes)
 
 		if important {
-			bpi.EncodeSegInfo(seg, kcp.mtu, level)
+			bpi.EncodeSegInfo(seg, level)
 		} else {
-			bp.EncodeSegInfo(seg, kcp.mtu, level)
+			bp.EncodeSegInfo(seg, level)
 		}
 	}
 
@@ -901,39 +938,50 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	}
 
 	flushBuffer := func() {
-		// contain ack
-		for i := bpi.Level; i >= 0; i-- {
-			var size int
-			if i == bpi.Level {
-				size = bpi.GetAckBufferSize()
-			} else {
-				size = bpi.GetBufferSize(i)
+		flush_internal_buffer := func(bp *KCPBufferPool, important bool) {
+
+			if len(bp.UsedFlat) == 0 {
+				return
 			}
 
-			if size != 0 {
-				for _, mtu_buffer := range bpi.Used[i] {
-					if i == bpi.Level {
-						kcp.output(mtu_buffer, len(mtu_buffer), true, 0)
-					} else {
-						kcp.output(mtu_buffer, len(mtu_buffer), true, uint32(i))
+			if important {
+				bp.CombineACKIfAllow()
+			}
+
+			for level, flat_size := range bp.UsedFlat {
+				if flat_size == 0 {
+					LogError("used flat: %v", bp.UsedFlat)
+					panic(errors.New("invalid flat. logic error"))
+				}
+
+				var flat uint32 = 0
+				for ; flat < flat_size; flat++ {
+					combine_key := C32T64(level, flat)
+
+					if bp.UsedIndex[combine_key] == 0 {
+						LogError("used flat: %v \n, used index: %v", bp.UsedFlat, bp.UsedIndex)
+						panic(errors.New("logic error"))
 					}
 
+					if level == bp.Level {
+						if !important {
+							panic(errors.New("invalid ack. logic error"))
+						}
+						kcp.output(*bp.Used[combine_key], int(bp.UsedIndex[combine_key]), true, 0)
+					} else {
+						kcp.output(*bp.Used[combine_key], int(bp.UsedIndex[combine_key]), important, level)
+					}
+					bp.reuse.Put(bp.Used[combine_key])
 				}
-				bpi.Used[i] = nil
 			}
+
+			bp.Used = make(map[uint64]*[]byte)
+			bp.UsedFlat = make(map[uint32]uint32)
+			bp.UsedIndex = make(map[uint64]uint32)
 		}
+		flush_internal_buffer(bpi, true)
+		flush_internal_buffer(bp, false)
 
-		for i := bp.Level - 1; i >= 0; i-- {
-			size := bp.GetBufferSize(i)
-			if size != 0 {
-
-				for _, mtu_buffer := range bp.Used[i] {
-					kcp.output(mtu_buffer, len(mtu_buffer), false, uint32(i))
-				}
-
-				bp.Used[i] = nil
-			}
-		}
 	}
 
 	if ackOnly { // flush remain ack segments
