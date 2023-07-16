@@ -655,6 +655,11 @@ func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 	shouldAddToMeteredQ := important && s.meteredRemote != nil
 	shouldAddToMeteredQ = SessionTypeDealImportPackage(shouldAddToMeteredQ, s.meteredRemote != nil)
 
+	// if current package added to meter, should not puts it into retry queue.
+	if shouldAddToMeteredQ {
+		retryTimes = 0
+	}
+
 	// 4. TxQueue
 	var msg ipv4.Message
 	for i := 0; i < s.dup+1; i++ {
