@@ -66,8 +66,6 @@ var (
 	globalSessionType int32 = SessionTypeNormal
 	// no need use atomic value
 	GlobalMontorChannel bool = false
-
-	GlobalEnableRetryTimes bool = true
 )
 
 func RunningAsNormal() {
@@ -162,6 +160,8 @@ type (
 		meteredRemote  *net.UDPAddr
 
 		mu sync.Mutex
+
+		EnableRetryPkgs bool
 	}
 
 	UDPSessionMonitor struct {
@@ -217,6 +217,7 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	sess.l = l
 	sess.block = block
 	sess.recvbuf = make([]byte, mtuLimit)
+	sess.EnableRetryPkgs = true
 
 	// cast to writebatch conn
 	sess.xconn = castToBatchConn(conn)
@@ -628,9 +629,11 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 	var ecc [][]byte
 
-	if !GlobalEnableRetryTimes {
+	if !s.EnableRetryPkgs {
 		retryTimes = 0
 	}
+
+	fmt.Printf("globalSessionType: %d \n", globalSessionType)
 
 	// 1. FEC encoding
 	if s.fecEncoder != nil {
