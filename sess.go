@@ -139,7 +139,7 @@ type (
 		socketWriteErrorOnce sync.Once
 
 		// grpc controller server
-		controller *SessionController
+		KcpSessionController *SessionController
 
 		// nonce generator
 		nonce Entropy
@@ -272,7 +272,7 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 }
 
 func (sess *UDPSession) SetSessionController(controller *SessionController) {
-	sess.controller = controller
+	sess.KcpSessionController = controller
 }
 
 // Read implements net.Conn
@@ -941,7 +941,7 @@ func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) {
 	} else {
 		LogInfo("Enabled monitor, monitor stared. interval=%d,detectRate=%f. global session type is %d \n", interval, detectRate, s.CurrentSessionType)
 		s.MontorChannelStarted = true
-		go MonitorStart(s, interval, detectRate, s.controller)
+		go MonitorStart(s, interval, detectRate, s.KcpSessionController)
 	}
 }
 
