@@ -52,11 +52,13 @@ func NewDefaultConfig() *SessionControllerConfig {
 	c.StartGRPC = true
 	c.ControllerIP = "0.0.0.0"
 	c.ControllerPort = 10720
-	c.EnableOriginRouteDetect = true
+
+	// failover logic relative
+	c.AllowDetect = false
+	c.EnableOriginRouteDetect = false
 	c.RouteDetectTimes = 10
 	c.SatisfyingDetectionRate = 0.7
 	c.DetectPackageNumbersEachTimes = 10
-	c.AllowDetect = true
 	c.DetectedIP = "0.0.0.0"
 	c.DetectedPort = 10721
 	return c
@@ -102,31 +104,23 @@ func (sessionController *SessionController) AllowSwitchBakcup() {
 	sessionController.allowSwitchBakcup = true
 }
 
-func (sessionController *SessionController) SwitchGlobalSessionType(sessionType int32, flushDetecting bool) error {
+func (sessionController *SessionController) SwitchGlobalSessionType(s *UDPSession, sessionType int32, flushDetecting bool) error {
 	if flushDetecting && atomic.LoadInt32(&sessionController.isDectecting) == -1 {
 		atomic.StoreInt32(&sessionController.isDectecting, 0)
 	}
 
 	switch sessionType {
 	case SessionTypeNormal:
-		RunningAsNormal()
+		RunningAsNormal(s)
 	case SessionTypeExistMetered:
-		RunningAsExistMetered()
+		RunningAsExistMetered(s)
 	case SessionTypeOnlyMetered:
-		RunningAsOnlyMetered()
+		RunningAsOnlyMetered(s)
 	default:
 		return errors.New(fmt.Sprintf("Inavlid sessionType, sessionType should between [%d,%d]",
 			SessionTypeOnlyMeteredMin, SessionTypeOnlyMeteredMax))
 	}
 	return nil
-}
-
-func (sessionController *SessionController) SwitchGlobalRetryTimes(enableRetryTimes bool) {
-	GlobalEnableRetryTimes = enableRetryTimes
-}
-
-func (sessionController *SessionController) GetGlobalSessionTypeValue() int32 {
-	return atomic.LoadInt32(&globalSessionType)
 }
 
 func NewSessionController(config *SessionControllerConfig, serverSide bool) *SessionController {
@@ -245,7 +239,7 @@ func (server *SessionControllerServer) GetSessions(context.Context, *pb.GetSessi
 	d.SegsAcked = s.SegmentNumbersACKed
 	d.SegsPromoteAcked = s.SegmentNumbersPromotedACKed
 
-	d.Status = pb.SessionStatus(atomic.LoadInt32(&globalSessionType))
+	d.Status = -1
 
 	reply.Connections[0] = d
 
@@ -263,7 +257,7 @@ func (server *SessionControllerServer) RegsiterNewSession(_ context.Context, req
 	return &reply, nil
 }
 
-func LoopExistMetered(sessMonitor *UDPSessionMonitor, detectRate float64) (typeChanged bool) {
+func LoopExistMetered(sess *UDPSession, sessMonitor *UDPSessionMonitor, detectRate float64) (typeChanged bool) {
 
 	cSegmentACKed := atomic.LoadUint64(&DefaultSnmp.SegmentNumbersACKed)
 	cSegmentPromotedACKed := atomic.LoadUint64(&DefaultSnmp.SegmentNumbersPromotedACKed)
@@ -283,7 +277,7 @@ func LoopExistMetered(sessMonitor *UDPSessionMonitor, detectRate float64) (typeC
 
 	if dSegmentACKed != 0 && (float64(dSegmentPromotedACKed)/float64(dSegmentACKed) > detectRate) {
 		// change to only meter route
-		RunningAsOnlyMetered()
+		RunningAsOnlyMetered(sess)
 		typeChanged = true
 	}
 
@@ -439,10 +433,10 @@ func DetectOriginRouteProcess(interval uint64, controller *SessionController) (c
 	return
 }
 
-func DetectOriginRoute(interval uint64, controller *SessionController) {
+func DetectOriginRoute(sess *UDPSession, interval uint64, controller *SessionController) {
 	atomic.StoreInt32(&controller.isDectecting, 1)
 	if DetectOriginRouteProcess(interval, controller) {
-		RunningAsExistMetered()
+		RunningAsExistMetered(sess)
 		atomic.StoreInt32(&controller.isDectecting, 0)
 	} else {
 		atomic.StoreInt32(&controller.isDectecting, -1)
@@ -472,17 +466,17 @@ func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, control
 
 	for {
 
-		if globalSessionType == SessionTypeNormal && meterDelayInit && sess.meteredRemote != nil {
-			RunningAsExistMetered()
+		if sess.CurrentSessionType == SessionTypeNormal && meterDelayInit && sess.meteredRemote != nil {
+			RunningAsExistMetered(sess)
 			meterDelayInit = false
 		}
 
 		changed := false
-		if globalSessionType == SessionTypeExistMetered {
-			changed = LoopExistMetered(sessMonitor, detectRate)
+		if sess.CurrentSessionType == SessionTypeExistMetered {
+			changed = LoopExistMetered(sess, sessMonitor, detectRate)
 		}
 
-		if globalSessionType == SessionTypeOnlyMetered {
+		if sess.CurrentSessionType == SessionTypeOnlyMetered {
 			if controller != nil {
 				LogInfo("allow detect: %t, newRegistered route: %t, allowSwitchBakcup: %t, detecting status: %d", controller.config.EnableOriginRouteDetect,
 					controller.newRegistered, controller.allowSwitchBakcup, atomic.LoadInt32(&controller.isDectecting))
@@ -496,11 +490,11 @@ func MonitorStart(sess *UDPSession, interval uint64, detectRate float64, control
 							atomic.StoreInt32(&controller.isDectecting, -1)
 							LogInfo("origin route still detecting. already disabled.")
 						}
-						RunningAsExistMetered()
+						RunningAsExistMetered(sess)
 					}
 					controller.resetRegisterServer()
 				} else if controller.config.EnableOriginRouteDetect && atomic.LoadInt32(&controller.isDectecting) == 0 && controller.allowDectecting {
-					go DetectOriginRoute(interval, controller)
+					go DetectOriginRoute(sess, interval, controller)
 				} else if changed {
 					LogWarn("Controller Server stared, but not enable the route detece and not config the backup server.")
 				}

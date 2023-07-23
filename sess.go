@@ -62,38 +62,30 @@ const (
 	SessionTypeOnlyMeteredMax int32 = SessionTypeOnlyMetered
 )
 
-var (
-	globalSessionType int32 = SessionTypeNormal
-	// no need use atomic value
-	GlobalMontorChannel bool = false
-
-	GlobalEnableRetryTimes bool = true
-)
-
-func RunningAsNormal() {
-	atomic.StoreInt32(&globalSessionType, SessionTypeNormal)
+func RunningAsNormal(sess *UDPSession) {
+	atomic.StoreInt32(&sess.CurrentSessionType, SessionTypeNormal)
 	LogInfo("current session running as SessionTypeNormal")
 }
 
-func RunningAsExistMetered() {
-	atomic.StoreInt32(&globalSessionType, SessionTypeExistMetered)
+func RunningAsExistMetered(sess *UDPSession) {
+	atomic.StoreInt32(&sess.CurrentSessionType, SessionTypeExistMetered)
 	LogInfo("current session running as SessionTypeExistMetered")
 }
 
-func RunningAsOnlyMetered() {
-	atomic.StoreInt32(&globalSessionType, SessionTypeOnlyMetered)
+func RunningAsOnlyMetered(sess *UDPSession) {
+	atomic.StoreInt32(&sess.CurrentSessionType, SessionTypeOnlyMetered)
 	LogInfo("current session running as SessionTypeOnlyMetered")
 }
 
-func SessionTypeDealImportPackage(shouldAddToMeteredQ bool, existMeterRoute bool) bool {
+func SessionTypeDealImportPackage(sess *UDPSession, shouldAddToMeteredQ bool, existMeterRoute bool) bool {
 
-	if globalSessionType == SessionTypeNormal {
+	if sess.CurrentSessionType == SessionTypeNormal {
 		shouldAddToMeteredQ = false
-	} else if globalSessionType == SessionTypeOnlyMetered && existMeterRoute {
+	} else if sess.CurrentSessionType == SessionTypeOnlyMetered && existMeterRoute {
 		shouldAddToMeteredQ = true
 	}
 
-	// if globalSessionType == SessionTypeExistMetered
+	// if sess.CurrentSessionType == SessionTypeExistMetered
 	// Then shouldAddToMeteredQ should not be changed
 
 	return shouldAddToMeteredQ
@@ -162,6 +154,10 @@ type (
 		meteredRemote  *net.UDPAddr
 
 		mu sync.Mutex
+
+		EnableRetryPkgs      bool
+		MontorChannelStarted bool
+		CurrentSessionType   int32
 	}
 
 	UDPSessionMonitor struct {
@@ -217,6 +213,9 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	sess.l = l
 	sess.block = block
 	sess.recvbuf = make([]byte, mtuLimit)
+	sess.EnableRetryPkgs = true
+	sess.MontorChannelStarted = false
+	sess.CurrentSessionType = SessionTypeNormal
 
 	// cast to writebatch conn
 	sess.xconn = castToBatchConn(conn)
@@ -238,13 +237,13 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	}
 
 	if l != nil {
-		sess.kcp = NewKCPWithDrop(conv, func(buf []byte, size int, important bool, retryTimes uint32) {
+		sess.kcp = NewKCPWithDrop(conv, &sess.CurrentSessionType, func(buf []byte, size int, important bool, retryTimes uint32) {
 			if size >= IKCP_OVERHEAD+sess.headerSize {
 				sess.output(buf[:size], important, retryTimes)
 			}
 		}, l.dropKcpAckRate, l.dropOn)
 	} else {
-		sess.kcp = NewKCP(conv, func(buf []byte, size int, important bool, retryTimes uint32) {
+		sess.kcp = NewKCP(conv, &sess.CurrentSessionType, func(buf []byte, size int, important bool, retryTimes uint32) {
 			if size >= IKCP_OVERHEAD+sess.headerSize {
 				sess.output(buf[:size], important, retryTimes)
 			}
@@ -628,7 +627,7 @@ func (s *UDPSession) SetWriteBuffer(bytes int) error {
 func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 	var ecc [][]byte
 
-	if !GlobalEnableRetryTimes {
+	if !s.EnableRetryPkgs {
 		retryTimes = 0
 	}
 
@@ -653,7 +652,7 @@ func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 	}
 
 	shouldAddToMeteredQ := important && s.meteredRemote != nil
-	shouldAddToMeteredQ = SessionTypeDealImportPackage(shouldAddToMeteredQ, s.meteredRemote != nil)
+	shouldAddToMeteredQ = SessionTypeDealImportPackage(s, shouldAddToMeteredQ, s.meteredRemote != nil)
 
 	// if current package added to meter, should not puts it into retry queue.
 	if shouldAddToMeteredQ {
@@ -671,7 +670,7 @@ func (s *UDPSession) output(buf []byte, important bool, retryTimes uint32) {
 		msg.Addr = s.remote
 		s.txqueue = append(s.txqueue, msg)
 
-		if globalSessionType == SessionTypeExistMetered {
+		if s.CurrentSessionType == SessionTypeExistMetered {
 			// If ack here, retryTimes will always be 0
 			for i := 1; uint32(i) < (retryTimes + 1); i++ {
 				var msg_dump ipv4.Message
@@ -932,16 +931,16 @@ func (s *UDPSession) EnableMonitor(interval uint64, detectRate float64) {
 
 	if s.meteredRemote == nil {
 		LogWarn("Without meter ip assigned.")
-		RunningAsNormal()
+		RunningAsNormal(s)
 	} else {
-		RunningAsExistMetered()
+		RunningAsExistMetered(s)
 	}
 
-	if GlobalMontorChannel {
+	if s.MontorChannelStarted {
 		LogWarn("Monitor already started.")
 	} else {
-		LogInfo("Enabled monitor, monitor stared. interval=%d,detectRate=%f. global session type is %d \n", interval, detectRate, globalSessionType)
-		GlobalMontorChannel = true
+		LogInfo("Enabled monitor, monitor stared. interval=%d,detectRate=%f. global session type is %d \n", interval, detectRate, s.CurrentSessionType)
+		s.MontorChannelStarted = true
 		go MonitorStart(s, interval, detectRate, s.controller)
 	}
 }
