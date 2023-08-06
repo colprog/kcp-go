@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha1"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/urfave/cli/v2"
 	"github.com/xtaci/kcp-go/v5"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 type (
@@ -29,6 +31,8 @@ type (
 		LoopTimes           int     `json:"LoopTimes"`
 		EnableVerifyMode    bool    `json:"EnableVerifyMode"`
 		EnablePProf         bool    `json:"EnablePProf"`
+		EnableAES           bool    `json:"EnableAES"`
+		QuietMode           bool    `json:"QuietMode"`
 	}
 
 	BenchSerOps struct {
@@ -40,6 +44,8 @@ type (
 		EnableVerifyMode      bool    `json:"EnableVerifyMode"`
 		ExpectVerifyLoopTimes int     `json:"ExpectVerifyLoopTimes"`
 		EnablePProf           bool    `json:"EnablePProf"`
+		EnableAES             bool    `json:"EnableAES"`
+		QuietMode             bool    `json:"QuietMode"`
 	}
 
 	BenchOps struct {
@@ -59,9 +65,11 @@ const (
 )
 
 const (
-	DefaultControlPort       int = 10721
-	DefaultVerifyDataLength  int = 1000
-	DefaultVerifyDataNumbers int = 1000
+	DefaultControlPort       int    = 10721
+	DefaultVerifyDataLength  int    = 1000
+	DefaultVerifyDataNumbers int    = 1000
+	DefaultAESKey            string = "aes-key"
+	DefaultAESSalt           string = "aes-salt"
 )
 
 func main() {
@@ -140,6 +148,16 @@ func main() {
 						Usage: "enable start pprof sever. server side port is 10077",
 						Value: false,
 					},
+					&cli.BoolFlag{
+						Name:  "enable-aes",
+						Usage: "enable transform with AES",
+						Value: false,
+					},
+					&cli.BoolFlag{
+						Name:  "quiet-mode",
+						Usage: "be quiet when benchmark running",
+						Value: false,
+					},
 				},
 				Action: func(c *cli.Context) error {
 					runMode = ServerMode
@@ -151,6 +169,8 @@ func main() {
 					benchSerOps.EnableVerifyMode = c.Bool("enable-verify-mode")
 					benchSerOps.ExpectVerifyLoopTimes = c.Int("expect-verify-loop-times")
 					benchSerOps.EnablePProf = c.Bool("enable-pprof")
+					benchSerOps.EnableAES = c.Bool("enable-aes")
+					benchSerOps.QuietMode = c.Bool("quiet-mode")
 
 					if len(benchSerOps.MeteredAddress) == 0 {
 						return errors.New("invalid MeteredAddress")
@@ -254,6 +274,16 @@ func main() {
 						Usage: "enable start pprof sever. client side port is 10078",
 						Value: false,
 					},
+					&cli.BoolFlag{
+						Name:  "enable-aes",
+						Usage: "enable transform with AES",
+						Value: false,
+					},
+					&cli.BoolFlag{
+						Name:  "quiet-mode",
+						Usage: "be quiet when benchmark running",
+						Value: false,
+					},
 				},
 				Action: func(c *cli.Context) error {
 					runMode = ClientMode
@@ -269,6 +299,8 @@ func main() {
 					benchCliOps.LoopTimes = c.Int("loop-times")
 					benchCliOps.EnableVerifyMode = c.Bool("enable-verify-mode")
 					benchCliOps.EnablePProf = c.Bool("enable-pprof")
+					benchCliOps.EnableAES = c.Bool("enable-aes")
+					benchCliOps.QuietMode = c.Bool("quiet-mode")
 
 					if len(benchCliOps.RemoteMeterAddr) == 0 {
 						return errors.New("invalid RemoteMeterAddr")
@@ -428,7 +460,19 @@ func startServer(args *BenchSerOps) error {
 	listenSlowAddrStr := fmt.Sprintf("%s:%d", "0.0.0.0", args.ListenSlowPort)
 
 	kcp.LogTest("Server slow path listen to: %s", listenSlowAddrStr)
-	slowListener, err := kcp.ListenWithDrop(listenSlowAddrStr, args.DropRate)
+
+	var block kcp.BlockCrypt = nil
+	if args.EnableAES {
+		var err error
+		key := pbkdf2.Key([]byte(DefaultAESKey), []byte(DefaultAESSalt), 1024, 32, sha1.New)
+
+		block, err = kcp.NewAESBlockCrypt(key)
+		if err != nil {
+			return err
+		}
+	}
+
+	slowListener, err := kcp.ListenWithDrop(listenSlowAddrStr, block, args.DropRate)
 	if err != nil {
 		return err
 	}
@@ -475,25 +519,27 @@ func handleMessage(conn *kcp.UDPSession, args *BenchSerOps) {
 			}
 		}
 
-		switch verified {
-		case -1:
-			{
-				kcp.LogTest("Server side revc: %d", n)
-				break
-			}
-		case 0:
-			{
-				kcp.LogWarn("Server side revc: %d, verified failed", n)
-				break
-			}
-		case 1:
-			{
-				kcp.LogTest("Server side revc: %d, verified.", n)
-				break
-			}
-		default:
-			{
-				log.Panicln("logic error")
+		if !args.QuietMode {
+			switch verified {
+			case -1:
+				{
+					kcp.LogTest("Server side revc: %d", n)
+					break
+				}
+			case 0:
+				{
+					kcp.LogWarn("Server side revc: %d, verified failed", n)
+					break
+				}
+			case 1:
+				{
+					kcp.LogTest("Server side revc: %d, verified.", n)
+					break
+				}
+			default:
+				{
+					log.Panicln("logic error")
+				}
 			}
 		}
 
@@ -527,9 +573,20 @@ func start(args *BenchCliOps) error {
 		}()
 	}
 
+	var block kcp.BlockCrypt = nil
+	if args.EnableAES {
+		var err error
+		key := pbkdf2.Key([]byte(DefaultAESKey), []byte(DefaultAESSalt), 1024, 32, sha1.New)
+
+		block, err = kcp.NewAESBlockCrypt(key)
+		if err != nil {
+			return err
+		}
+	}
+
 	remoteSlowAddrStr := fmt.Sprintf("%s:%d", args.RemoteAddress, args.RemoteSlowAddr)
 	kcp.LogTest("Connect to: %s", remoteSlowAddrStr)
-	if sess, err := kcp.Dial(remoteSlowAddrStr); err == nil {
+	if sess, err := kcp.DialWithOptions(remoteSlowAddrStr, block, 0, 0); err == nil {
 		sess.SetMeteredAddr(args.RemoteMeterAddr, uint16(args.RemoteSlowAddr), true)
 
 		cliConfig := kcp.NewDefaultConfig()
@@ -547,7 +604,9 @@ func start(args *BenchCliOps) error {
 			}
 
 			if _, err := sess.Write([]byte(data)); err == nil {
-				kcp.LogTest("sent: %d", dataLen)
+				if !args.QuietMode {
+					kcp.LogTest("sent: %d", dataLen)
+				}
 			} else {
 				return err
 			}

@@ -298,8 +298,8 @@ func Listen(laddr string) (*Listener, error) {
 	return ListenWithDetailOptions(laddr, nil, 0, 0, nil, InfoLevelLog)
 }
 
-func ListenWithDrop(laddr string, dropRate float64) (*Listener, error) {
-	l, err := ListenWithDetailOptions(laddr, nil, 0, 0, nil, DebugLevelLog)
+func ListenWithDrop(laddr string, block BlockCrypt, dropRate float64) (*Listener, error) {
+	l, err := ListenWithDetailOptions(laddr, block, 0, 0, nil, DebugLevelLog)
 	if l == nil || err != nil {
 		return l, err
 	}
