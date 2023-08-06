@@ -176,6 +176,8 @@ type KCP struct {
 	// drop
 	dropRate float64
 	dropOn   bool
+
+	SessionType *int32
 }
 
 type ackItem struct {
@@ -188,7 +190,7 @@ type ackItem struct {
 // 'conv' must be equal in the connection peers, or else data will be silently rejected.
 //
 // 'output' function will be called whenever these is data to be sent on wire.
-func NewKCP(conv uint32, output output_callback) *KCP {
+func NewKCP(conv uint32, sessionType *int32, output output_callback) *KCP {
 	kcp := new(KCP)
 	kcp.conv = conv
 	kcp.snd_wnd = IKCP_WND_SND
@@ -207,11 +209,13 @@ func NewKCP(conv uint32, output output_callback) *KCP {
 	kcp.fastacklimit = IKCP_FASTACK_LIMIT
 	kcp.send_all_acks_through_metered_ip = false
 	kcp.metered_ip_aggressiveness = 0
+
+	kcp.SessionType = sessionType
 	return kcp
 }
 
-func NewKCPWithDrop(conv uint32, output output_callback, dropRate float64, dropOn bool) *KCP {
-	kcp := NewKCP(conv, output)
+func NewKCPWithDrop(conv uint32, sessionType *int32, output output_callback, dropRate float64, dropOn bool) *KCP {
+	kcp := NewKCP(conv, sessionType, output)
 	kcp.setDropRate(dropRate)
 	if dropOn {
 		kcp.dropOpen()
@@ -232,7 +236,7 @@ func (kcp *KCP) newSegment(size int) (seg segment) {
 func (kcp *KCP) delSegment(seg *segment) {
 	atomic.AddUint64(&DefaultSnmp.SegmentNumbersACKed, 1)
 
-	if seg.has_promote || globalSessionType == SessionTypeOnlyMetered {
+	if seg.has_promote || *kcp.SessionType == SessionTypeOnlyMetered {
 		atomic.AddUint64(&DefaultSnmp.SegmentNumbersPromotedACKed, 1)
 	}
 	if seg.data != nil {
@@ -1131,9 +1135,9 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 
 			promote := segment.xmit > 3 || (segment.xmit >= 2 && len(kcp.acklist) > 0)
 
-			// If globalSessionType is SessionTypeNormal
+			// If *kcp.SessionType is SessionTypeNormal
 			// Then current segment or ack won't be promote in `output`
-			if promote && globalSessionType != SessionTypeNormal {
+			if promote && *kcp.SessionType != SessionTypeNormal {
 				segment.has_promote = true
 			}
 

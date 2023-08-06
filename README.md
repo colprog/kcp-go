@@ -214,15 +214,16 @@ Main logic:
     - decting the origin route back or not after origin route is unavailable
     - replace the origin route by registered route
   - Client side status machine 
-    - If there no configured alter route, Then `globalSessionType` will be set in `SessionTypeNormal` 
-    - If there configured alter route, Then `globalSessionType` will be set in `SessionTypeExistMetered`
+    - If there no configured alter route, Then `CurrentSessionType` will be set in `SessionTypeNormal` 
+    - If there configured alter route, Then `CurrentSessionType` will be set in `SessionTypeExistMetered`
     - In type `SessionTypeExistMetered` 
       - Client side will watch the origin route status 
       - If origin route is available, Then type won't changed
       - If origin route is unavailable, Then type change to `SessionTypeOnlyMetered`
     - In type `SessionTypeOnlyMetered` 
       - Client side will send all package in alter route. 
-      - Decting the origin route
+      - Decting the origin route (deprecated)
+        - current route have been deprecated
         - Decting will continue for N rounds for M times, Determine route quality based on single-round inspection results
         - If origin route back to available, then type change to `SessionTypeExistMetered`
         - If origin route still failed, then begin to check backup route
